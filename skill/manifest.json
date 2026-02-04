@@ -1,0 +1,70 @@
+{
+  "name": "rook-protocol",
+  "version": "1.1.0",
+  "description": "USDC escrow with layered verification and Voight-Kampff identity challenges",
+  "author": "Rook Protocol",
+  "license": "MIT",
+  "repository": "https://github.com/rook-protocol/rook-protocol",
+  "entry": "cli/src/index.ts",
+  "commands": [
+    {
+      "name": "create",
+      "description": "Create a new escrow",
+      "args": [
+        { "name": "amount", "type": "number", "required": true },
+        { "name": "recipient", "type": "string", "required": true },
+        { "name": "job", "type": "string", "required": true },
+        { "name": "threshold", "type": "number", "default": 65 }
+      ]
+    },
+    {
+      "name": "verify",
+      "description": "Check an agent's trust score",
+      "args": [
+        { "name": "agent", "type": "string", "required": true }
+      ]
+    },
+    {
+      "name": "challenge",
+      "description": "Initiate identity challenge",
+      "args": [
+        { "name": "escrow", "type": "string", "required": true },
+        { "name": "stake", "type": "number", "default": 5 }
+      ]
+    },
+    {
+      "name": "prove",
+      "description": "Respond to identity challenge",
+      "args": [
+        { "name": "escrow", "type": "string", "required": true },
+        { "name": "method", "type": "string", "required": true }
+      ]
+    },
+    {
+      "name": "release",
+      "description": "Manually release escrow funds",
+      "args": [
+        { "name": "escrow", "type": "string", "required": true }
+      ]
+    },
+    {
+      "name": "dispute",
+      "description": "Escalate to Kleros arbitration",
+      "args": [
+        { "name": "escrow", "type": "string", "required": true },
+        { "name": "evidence", "type": "string", "required": true }
+      ]
+    },
+    {
+      "name": "status",
+      "description": "Check escrow status",
+      "args": [
+        { "name": "escrow", "type": "string", "required": true }
+      ]
+    }
+  ],
+  "env": {
+    "required": ["PRIVATE_KEY"],
+    "optional": ["ROOK_NETWORK", "ROOK_RPC_URL"]
+  }
+}

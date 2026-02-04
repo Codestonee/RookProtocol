@@ -1,0 +1,139 @@
+# ═══════════════════════════════════════════════════════════════
+# Rook Protocol .gitignore
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# Dependencies
+# ═══════════════════════════════════════════════════════════════
+
+node_modules/
+.pnp/
+.pnp.js
+.yarn/install-state.gz
+
+# ═══════════════════════════════════════════════════════════════
+# Build Outputs
+# ═══════════════════════════════════════════════════════════════
+
+# TypeScript/JavaScript
+dist/
+build/
+*.tsbuildinfo
+
+# Next.js
+.next/
+out/
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+
+# Hardhat (if used)
+cache/
+artifacts/
+typechain/
+typechain-types/
+
+# ═══════════════════════════════════════════════════════════════
+# Environment & Secrets
+# ═══════════════════════════════════════════════════════════════
+
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Private keys and sensitive data
+*.pem
+*.key
+secrets.json
+
+# ═══════════════════════════════════════════════════════════════
+# Testing
+# ═══════════════════════════════════════════════════════════════
+
+coverage/
+.nyc_output/
+*.log
+
+# ═══════════════════════════════════════════════════════════════
+# IDE & Editor
+# ═══════════════════════════════════════════════════════════════
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# IntelliJ/WebStorm
+.idea/
+*.iml
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+.#*
+
+# ═══════════════════════════════════════════════════════════════
+# OS Files
+# ═══════════════════════════════════════════════════════════════
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ═══════════════════════════════════════════════════════════════
+# Misc
+# ═══════════════════════════════════════════════════════════════
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# Package manager
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Turbo
+.turbo/
+
+# Vercel
+.vercel/
+
+# Local Netlify folder
+.netlify/
+
+# Storybook
+storybook-static/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Solidity
+contracts/.gas-snapshot

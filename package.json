@@ -1,0 +1,58 @@
+{
+  "name": "rook-protocol",
+  "version": "1.1.0",
+  "description": "Trustless USDC escrow for AI agents with multi-layered verification",
+  "private": true,
+  "workspaces": [
+    "sdk",
+    "cli",
+    "oracle"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,sol,md}\"",
+    "contract:build": "cd contracts && forge build",
+    "contract:test": "cd contracts && forge test",
+    "contract:deploy:testnet": "cd contracts && forge script script/Deploy.s.sol --rpc-url $BASE_SEPOLIA_RPC --broadcast --verify",
+    "contract:verify": "cd contracts && forge verify-contract",
+    "sdk:build": "cd sdk && npm run build",
+    "cli:build": "cd cli && npm run build",
+    "oracle:dev": "cd oracle && npm run dev",
+    "web:dev": "cd web && npm run dev",
+    "web:build": "cd web && npm run build",
+    "demo": "tsx scripts/demo.ts",
+    "setup": "bash scripts/setup-env.sh"
+  },
+  "keywords": [
+    "escrow",
+    "usdc",
+    "ai-agents",
+    "erc-8004",
+    "blockchain",
+    "base",
+    "settlement",
+    "verification",
+    "trustless"
+  ],
+  "author": "Rook ♜ <rook@rook-protocol.xyz>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rook-protocol/rook-protocol.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "prettier": "^3.0.0",
+    "prettier-plugin-solidity": "^1.0.0",
+    "turbo": "^1.10.0",
+    "typescript": "^5.0.0",
+    "tsx": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

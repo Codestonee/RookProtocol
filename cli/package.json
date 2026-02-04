@@ -1,0 +1,44 @@
+{
+  "name": "@rook-protocol/cli",
+  "version": "1.1.0",
+  "description": "CLI for Rook Protocol — Trustless USDC escrow for AI agents",
+  "bin": {
+    "rook": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --dts",
+    "dev": "tsup src/index.ts --format cjs --dts --watch",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "rook",
+    "cli",
+    "escrow",
+    "usdc",
+    "blockchain",
+    "ai-agents"
+  ],
+  "author": "Rook Protocol",
+  "license": "MIT",
+  "dependencies": {
+    "@rook-protocol/sdk": "workspace:*",
+    "commander": "^11.0.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "inquirer": "^8.2.6",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

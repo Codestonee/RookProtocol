@@ -1,0 +1,47 @@
+{
+  "name": "@rook-protocol/sdk",
+  "version": "1.1.0",
+  "description": "TypeScript SDK for Rook Protocol - Trustless USDC escrow for AI agents",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "rook",
+    "escrow",
+    "usdc",
+    "blockchain",
+    "ethereum",
+    "base",
+    "ai-agents",
+    "erc-8004"
+  ],
+  "author": "Rook Protocol",
+  "license": "MIT",
+  "dependencies": {
+    "ethers": "^6.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "ethers": "^6.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rook-protocol/rook-protocol.git",
+    "directory": "sdk"
+  }
+}
