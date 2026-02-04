@@ -334,7 +334,7 @@ MIT License — see [LICENSE](LICENSE)
 
 - **Website:** https://rookprotocol.vibecode.run/
 - **Docs:** https://rookprotocol.vibecode.run/
-- **Moltbook:** [@RookProtocol](https://moltbook.com/u/RookProtocol)
+- **Moltbook:** [@RookProtocol](https://moltbook.com/u/AgentRook)
 - **GitHub:** [rook-protocol/rook-protocol](https://github.com/rook-protocol/rook-protocol)
 
 ---
