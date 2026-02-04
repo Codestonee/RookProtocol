@@ -24,7 +24,6 @@ program
   .requiredOption('-r, --recipient <address>', 'Seller address or @handle')
   .requiredOption('-j, --job <string>', 'Job description')
   .option('-t, --threshold <number>', 'Trust threshold (0-100)', '65')
-  .option('--require-challenge', 'Require identity challenge before release')
   .action(async (options) => {
     const spinner = ora('Creating escrow...').start();
     
@@ -36,8 +35,7 @@ program
         amount: parseFloat(options.amount),
         recipient: options.recipient,
         job: options.job,
-        threshold: parseInt(options.threshold),
-        requireChallenge: options.requireChallenge
+        threshold: parseInt(options.threshold)
       });
       
       spinner.succeed('Escrow created!');
@@ -68,7 +66,6 @@ program
   .command('verify')
   .description('Check an agent\'s trust score')
   .requiredOption('-a, --agent <address>', 'Agent address or @handle')
-  .option('--deep', 'Include detailed behavioral analysis')
   .action(async (options) => {
     const spinner = ora('Verifying agent...').start();
     
@@ -112,7 +109,6 @@ program
   .command('challenge')
   .description('Initiate identity challenge (stake 5 USDC)')
   .requiredOption('-e, --escrow <id>', 'Escrow ID')
-  .option('-s, --stake <number>', 'Stake amount in USDC', '5')
   .option('-r, --reason <string>', 'Challenge reason')
   .action(async (options) => {
     const spinner = ora('Initiating challenge...').start();
@@ -121,9 +117,9 @@ program
       const config = loadConfig();
       const rook = new RookProtocol(config);
       
+      // NOTE: Stake is fixed at 5 USDC by contract
       const result = await rook.challenge({
         escrowId: options.escrow,
-        stake: parseFloat(options.stake),
         reason: options.reason
       });
       
@@ -149,30 +145,57 @@ program
   });
 
 // ═══════════════════════════════════════════════════════════════
-// PROVE (Respond to Challenge)
+// RESPOND (Seller response to challenge)
 // ═══════════════════════════════════════════════════════════════
 
 program
-  .command('prove')
-  .description('Respond to identity challenge')
+  .command('respond')
+  .description('Respond to identity challenge (seller only)')
   .requiredOption('-e, --escrow <id>', 'Escrow ID')
-  .requiredOption('-m, --method <type>', 'Proof method: wallet_signature | behavioral | tee_attestation')
+  .requiredOption('-d, --data <string>', 'Response data (will be hashed)')
   .action(async (options) => {
-    const spinner = ora('Generating proof...').start();
+    const spinner = ora('Submitting response...').start();
     
     try {
       const config = loadConfig();
       const rook = new RookProtocol(config);
       
-      const signature = await rook.prove(options.escrow, options.method);
+      const txHash = await rook.respondChallenge(options.escrow, options.data);
       
-      spinner.succeed('Proof submitted!');
-      
-      console.log('\n' + chalk.green('✓ Identity verified'));
-      console.log(chalk.dim('Signature:'), signature.slice(0, 42) + '...');
+      spinner.succeed('Response submitted!');
+      console.log(chalk.dim('TX Hash:'), txHash);
+      console.log(chalk.green('\n✓ Challenge response recorded'));
       
     } catch (error: any) {
-      spinner.fail('Proof failed');
+      spinner.fail('Response failed');
+      console.error(chalk.red(error.message));
+      process.exit(1);
+    }
+  });
+
+// ═══════════════════════════════════════════════════════════════
+// CLAIM TIMEOUT
+// ═══════════════════════════════════════════════════════════════
+
+program
+  .command('claim-timeout')
+  .description('Claim challenge timeout (if seller did not respond)')
+  .requiredOption('-e, --escrow <id>', 'Escrow ID')
+  .action(async (options) => {
+    const spinner = ora('Claiming timeout...').start();
+    
+    try {
+      const config = loadConfig();
+      const rook = new RookProtocol(config);
+      
+      const txHash = await rook.claimTimeout(options.escrow);
+      
+      spinner.succeed('Timeout claimed!');
+      console.log(chalk.dim('TX Hash:'), txHash);
+      console.log(chalk.yellow('\n⚠️  Challenge failed - stake returned, buyer refunded'));
+      
+    } catch (error: any) {
+      spinner.fail('Claim failed');
       console.error(chalk.red(error.message));
       process.exit(1);
     }
@@ -184,7 +207,7 @@ program
 
 program
   .command('release')
-  .description('Manually release escrow funds')
+  .description('Release escrow funds (oracle only)')
   .requiredOption('-e, --escrow <id>', 'Escrow ID')
   .action(async (options) => {
     const spinner = ora('Releasing escrow...').start();
@@ -193,7 +216,42 @@ program
       const config = loadConfig();
       const rook = new RookProtocol(config);
       
+      // Check if operator
+      const isOp = await rook.isOperator();
+      if (!isOp) {
+        spinner.fail('Not an oracle operator');
+        console.log(chalk.yellow('Use "consent-release" for mutual consent release after timeout'));
+        process.exit(1);
+      }
+      
       const txHash = await rook.release(options.escrow);
+      
+      spinner.succeed('Escrow released!');
+      console.log(chalk.dim('TX Hash:'), txHash);
+      
+    } catch (error: any) {
+      spinner.fail('Release failed');
+      console.error(chalk.red(error.message));
+      process.exit(1);
+    }
+  });
+
+// ═══════════════════════════════════════════════════════════════
+// CONSENT RELEASE
+// ═══════════════════════════════════════════════════════════════
+
+program
+  .command('consent-release')
+  .description('Release escrow with mutual consent (after 1 day timeout)')
+  .requiredOption('-e, --escrow <id>', 'Escrow ID')
+  .action(async (options) => {
+    const spinner = ora('Releasing with consent...').start();
+    
+    try {
+      const config = loadConfig();
+      const rook = new RookProtocol(config);
+      
+      const txHash = await rook.releaseWithConsent(options.escrow);
       
       spinner.succeed('Escrow released!');
       console.log(chalk.dim('TX Hash:'), txHash);
@@ -211,10 +269,9 @@ program
 
 program
   .command('dispute')
-  .description('Escalate to Kleros arbitration')
+  .description('Escalate to dispute')
   .requiredOption('-e, --escrow <id>', 'Escrow ID')
-  .requiredOption('--evidence <ipfs>', 'IPFS hash of evidence')
-  .option('--claim <string>', 'Dispute claim description')
+  .requiredOption('--evidence <string>', 'Evidence (IPFS hash or text)')
   .action(async (options) => {
     const spinner = ora('Filing dispute...').start();
     
@@ -226,7 +283,8 @@ program
       
       spinner.succeed('Dispute filed!');
       console.log(chalk.dim('TX Hash:'), txHash);
-      console.log(chalk.yellow('\n⚖️ Escrow funds locked pending Kleros arbitration'));
+      console.log(chalk.yellow('\n⚖️  Escrow funds locked pending resolution'));
+      console.log(chalk.gray('Contact contract owner to resolve dispute'));
       
     } catch (error: any) {
       spinner.fail('Dispute failed');
@@ -251,12 +309,14 @@ program
       const rook = new RookProtocol(config);
       
       const escrow = await rook.getEscrow(options.escrow);
+      const challenge = await rook['escrowContract'].getChallenge(options.escrow);
       
       spinner.succeed('Escrow found!');
       
       const statusColor = escrow.status === 'Released' ? chalk.green :
                           escrow.status === 'Active' ? chalk.blue :
                           escrow.status === 'Disputed' ? chalk.yellow :
+                          escrow.status === 'Challenged' ? chalk.magenta :
                           chalk.red;
       
       console.log('\n' + chalk.cyan('Escrow Status:'));
@@ -270,6 +330,21 @@ program
         'Created': escrow.createdAt ? new Date(escrow.createdAt * 1000).toISOString() : '-',
         'Expires': escrow.expiresAt ? new Date(escrow.expiresAt * 1000).toISOString() : '-'
       }));
+      
+      // Show challenge info if active
+      if (escrow.status === 'Challenged' && challenge.status !== 0) {
+        const currentBlock = await rook.getBlockNumber();
+        const blocksRemaining = Math.max(0, Number(challenge.deadline) - currentBlock);
+        
+        console.log('\n' + chalk.cyan('Challenge Status:'));
+        console.log(formatTable({
+          'Challenger': challenge.challenger,
+          'Stake': formatUSDC(Number(challenge.stake) / 1e6),
+          'Deadline Block': challenge.deadline.toString(),
+          'Blocks Remaining': blocksRemaining.toString(),
+          'Responded': challenge.responseHash !== '0x0000000000000000000000000000000000000000000000000000000000000000' ? 'Yes' : 'No'
+        }));
+      }
       
     } catch (error: any) {
       spinner.fail('Status check failed');

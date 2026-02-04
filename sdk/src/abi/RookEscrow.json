@@ -30,6 +30,13 @@
     "type": "function"
   },
   {
+    "inputs": [{ "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }],
+    "name": "releaseWithConsent",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [
       { "internalType": "bytes32", "name": "escrowId", "type": "bytes32" },
       { "internalType": "string", "name": "reason", "type": "string" }
@@ -50,8 +57,29 @@
     "type": "function"
   },
   {
+    "inputs": [
+      { "internalType": "bytes32", "name": "escrowId", "type": "bytes32" },
+      { "internalType": "address", "name": "winner", "type": "address" },
+      { "internalType": "string", "name": "reason", "type": "string" }
+    ],
+    "name": "resolveDispute",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [{ "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }],
     "name": "initiateChallenge",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "bytes32", "name": "escrowId", "type": "bytes32" },
+      { "internalType": "bytes32", "name": "responseHash", "type": "bytes32" }
+    ],
+    "name": "respondChallenge",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -95,6 +123,25 @@
     "type": "function"
   },
   {
+    "inputs": [{ "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }],
+    "name": "getChallenge",
+    "outputs": [{
+      "components": [
+        { "internalType": "address", "name": "challenger", "type": "address" },
+        { "internalType": "uint256", "name": "stake", "type": "uint256" },
+        { "internalType": "uint256", "name": "deadline", "type": "uint256" },
+        { "internalType": "uint8", "name": "status", "type": "uint8" },
+        { "internalType": "bool", "name": "passed", "type": "bool" },
+        { "internalType": "bytes32", "name": "responseHash", "type": "bytes32" }
+      ],
+      "internalType": "struct RookEscrow.Challenge",
+      "name": "",
+      "type": "tuple"
+    }],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [{ "internalType": "address", "name": "agent", "type": "address" }],
     "name": "getCompletionRate",
     "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
@@ -103,16 +150,23 @@
   },
   {
     "inputs": [],
-    "name": "usdc",
-    "outputs": [{ "internalType": "contract IERC20", "name": "", "type": "address" }],
+    "name": "CHALLENGE_STAKE",
+    "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
     "stateMutability": "view",
     "type": "function"
   },
   {
     "inputs": [],
-    "name": "oracle",
-    "outputs": [{ "internalType": "contract IRookOracle", "name": "", "type": "address" }],
-    "stateMutability": "view",
+    "name": "pause",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "unpause",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -134,9 +188,21 @@
       { "indexed": true, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" },
       { "indexed": true, "internalType": "address", "name": "seller", "type": "address" },
       { "indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256" },
-      { "indexed": false, "internalType": "uint256", "name": "trustScore", "type": "uint256" }
+      { "indexed": false, "internalType": "uint256", "name": "trustScore", "type": "uint256" },
+      { "indexed": false, "internalType": "bytes32", "name": "releaseReason", "type": "bytes32" }
     ],
     "name": "EscrowReleased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" },
+      { "indexed": false, "internalType": "address", "name": "winner", "type": "address" },
+      { "indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256" },
+      { "indexed": false, "internalType": "string", "name": "reason", "type": "string" }
+    ],
+    "name": "DisputeResolved",
     "type": "event"
   }
 ]

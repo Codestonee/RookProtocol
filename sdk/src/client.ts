@@ -14,6 +14,26 @@ import RookEscrowABI from './abi/RookEscrow.json';
 import RookOracleABI from './abi/RookOracle.json';
 import ERC20ABI from './abi/ERC20.json';
 
+/**
+ * Rook Protocol SDK
+ * 
+ * Trustless USDC escrow for AI agents with multi-layered verification.
+ * 
+ * @example
+ * ```typescript
+ * const rook = new RookProtocol({
+ *   network: 'base-sepolia',
+ *   privateKey: process.env.PRIVATE_KEY
+ * });
+ * 
+ * const escrow = await rook.createEscrow({
+ *   amount: 50,
+ *   recipient: '0x...',
+ *   job: 'Market analysis',
+ *   threshold: 65
+ * });
+ * ```
+ */
 export class RookProtocol {
   private provider: Provider;
   private signer: Wallet | null;
@@ -61,6 +81,19 @@ export class RookProtocol {
 
   /**
    * Create a new escrow
+   * 
+   * @param params - Escrow parameters
+   * @returns Escrow result with ID and transaction details
+   * 
+   * @example
+   * ```typescript
+   * const escrow = await rook.createEscrow({
+   *   amount: 50,
+   *   recipient: '0x...',
+   *   job: 'Market analysis',
+   *   threshold: 65
+   * });
+   * ```
    */
   async createEscrow(params: EscrowParams): Promise<EscrowResult> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
@@ -88,11 +121,23 @@ export class RookProtocol {
     );
     const receipt = await tx.wait();
     
-    // Extract escrow ID from event
-    const event = receipt.logs.find(
-      (log: any) => log.fragment?.name === 'EscrowCreated'
-    );
-    const escrowId = event?.args?.escrowId;
+    // Parse escrow ID from event using interface
+    const iface = this.escrowContract.interface;
+    const escrowCreatedEvent = receipt.logs
+      .map((log: any) => {
+        try {
+          return iface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
+      .find((parsed: any) => parsed && parsed.name === 'EscrowCreated');
+    
+    const escrowId = escrowCreatedEvent?.args?.escrowId;
+    
+    if (!escrowId) {
+      throw new RookError(ErrorCodes.UNKNOWN, 'Failed to parse escrow ID from transaction');
+    }
     
     return {
       id: escrowId,
@@ -108,11 +153,19 @@ export class RookProtocol {
 
   /**
    * Release escrow (requires oracle authorization)
+   * 
+   * @param escrowId - Escrow identifier
+   * @returns Transaction hash
    */
   async release(escrowId: string): Promise<string> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
     
-    // This is typically triggered by the oracle, but can be manual
+    // Check if caller is oracle operator
+    const isOperator = await this.oracleContract.operators(await this.signer.getAddress());
+    if (!isOperator) {
+      throw new RookError(ErrorCodes.UNAUTHORIZED, 'Only oracle operators can release escrows');
+    }
+    
     const tx = await this.oracleContract.triggerRelease(escrowId);
     const receipt = await tx.wait();
     
@@ -120,7 +173,26 @@ export class RookProtocol {
   }
 
   /**
-   * Request refund
+   * Release escrow with mutual consent (after oracle timeout)
+   * 
+   * @param escrowId - Escrow identifier
+   * @returns Transaction hash
+   */
+  async releaseWithConsent(escrowId: string): Promise<string> {
+    if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
+    
+    const tx = await this.escrowContract.releaseWithConsent(escrowId);
+    const receipt = await tx.wait();
+    
+    return receipt.hash;
+  }
+
+  /**
+   * Request refund (buyer only)
+   * 
+   * @param escrowId - Escrow identifier
+   * @param reason - Refund reason
+   * @returns Transaction hash
    */
   async refund(escrowId: string, reason: string): Promise<string> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
@@ -133,6 +205,10 @@ export class RookProtocol {
 
   /**
    * Escalate to dispute
+   * 
+   * @param escrowId - Escrow identifier
+   * @param evidence - IPFS hash or URL of evidence
+   * @returns Transaction hash
    */
   async dispute(escrowId: string, evidence: string): Promise<string> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
@@ -144,7 +220,27 @@ export class RookProtocol {
   }
 
   /**
+   * Resolve dispute (owner only)
+   * 
+   * @param escrowId - Escrow identifier
+   * @param winner - Address of winner (buyer or seller)
+   * @param reason - Resolution reason
+   * @returns Transaction hash
+   */
+  async resolveDispute(escrowId: string, winner: string, reason: string): Promise<string> {
+    if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
+    
+    const tx = await this.escrowContract.resolveDispute(escrowId, winner, reason);
+    const receipt = await tx.wait();
+    
+    return receipt.hash;
+  }
+
+  /**
    * Get escrow details
+   * 
+   * @param escrowId - Escrow identifier
+   * @returns Escrow details
    */
   async getEscrow(escrowId: string): Promise<EscrowResult> {
     const escrow = await this.escrowContract.getEscrow(escrowId);
@@ -168,6 +264,9 @@ export class RookProtocol {
 
   /**
    * Verify an agent's trust score
+   * 
+   * @param agent - Agent address or handle
+   * @returns Verification result with trust score breakdown
    */
   async verify(agent: string): Promise<VerificationResult> {
     const address = await this.resolveAddress(agent);
@@ -219,12 +318,19 @@ export class RookProtocol {
 
   /**
    * Initiate identity challenge
+   * 
+   * @param params - Challenge parameters
+   * @returns Challenge result
+   * 
+   * @remarks The stake amount is fixed at 5 USDC by the contract.
+   * Any stake value provided in params is ignored.
    */
   async challenge(params: ChallengeParams): Promise<ChallengeResult> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
     
-    const stake = params.stake || CHALLENGE_STAKE;
-    const stakeAmount = ethers.parseUnits(stake.toString(), 6);
+    // NOTE: Contract uses fixed CHALLENGE_STAKE (5 USDC)
+    // We use the constant instead of params.stake to avoid approval mismatch
+    const stakeAmount = CHALLENGE_STAKE;
     
     // Approve USDC for stake
     const approveTx = await this.usdcContract.approve(
@@ -243,7 +349,7 @@ export class RookProtocol {
     return {
       escrowId: params.escrowId,
       challenger: await this.signer.getAddress(),
-      stake,
+      stake: Number(ethers.formatUnits(stakeAmount, 6)),
       deadline: Number(challenge.deadline),
       reason: params.reason,
       txHash: receipt.hash
@@ -251,54 +357,50 @@ export class RookProtocol {
   }
 
   /**
-   * Respond to challenge (prove identity)
+   * Respond to challenge (seller only)
+   * 
+   * @param escrowId - Escrow identifier
+   * @param responseData - Response data (will be hashed)
+   * @returns Transaction hash
    */
-  async prove(
-    escrowId: string, 
-    method: 'wallet_signature' | 'behavioral' | 'tee_attestation'
-  ): Promise<string> {
+  async respondChallenge(escrowId: string, responseData: string): Promise<string> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
     
-    switch (method) {
-      case 'wallet_signature':
-        return this.proveWithSignature(escrowId);
-      case 'behavioral':
-        return this.proveWithBehavioral(escrowId);
-      case 'tee_attestation':
-        throw new RookError(ErrorCodes.NOT_IMPLEMENTED, 'TEE attestation coming soon');
-      default:
-        throw new RookError(ErrorCodes.INVALID_METHOD);
+    const responseHash = ethers.keccak256(ethers.toUtf8Bytes(responseData));
+    
+    const tx = await this.escrowContract.respondChallenge(escrowId, responseHash);
+    const receipt = await tx.wait();
+    
+    return receipt.hash;
+  }
+
+  /**
+   * Resolve challenge (oracle only)
+   * 
+   * @param escrowId - Escrow identifier
+   * @param passed - Whether challenge was passed
+   * @returns Transaction hash
+   */
+  async resolveChallenge(escrowId: string, passed: boolean): Promise<string> {
+    if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
+    
+    // Check if caller is oracle operator
+    const isOperator = await this.oracleContract.operators(await this.signer.getAddress());
+    if (!isOperator) {
+      throw new RookError(ErrorCodes.UNAUTHORIZED, 'Only oracle operators can resolve challenges');
     }
-  }
-
-  private async proveWithSignature(escrowId: string): Promise<string> {
-    if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
     
-    // Generate challenge nonce
-    const nonce = ethers.keccak256(
-      ethers.solidityPacked(
-        ['bytes32', 'uint256'],
-        [escrowId, Date.now()]
-      )
-    );
+    const tx = await this.oracleContract.resolveChallenge(escrowId, passed);
+    const receipt = await tx.wait();
     
-    // Sign the nonce
-    const signature = await this.signer.signMessage(ethers.getBytes(nonce));
-    
-    // Submit proof to oracle (off-chain verification)
-    // In production, this would call an API
-    console.log('Proof submitted:', { escrowId, nonce, signature });
-    
-    return signature;
-  }
-
-  private async proveWithBehavioral(escrowId: string): Promise<string> {
-    // Behavioral proof is verified off-chain
-    throw new RookError(ErrorCodes.NOT_IMPLEMENTED, 'Use oracle API for behavioral proof');
+    return receipt.hash;
   }
 
   /**
    * Claim challenge timeout (challenger wins)
+   * 
+   * @param escrowId - Escrow identifier
+   * @returns Transaction hash
    */
   async claimTimeout(escrowId: string): Promise<string> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
@@ -365,6 +467,16 @@ export class RookProtocol {
     
     const balance = await this.usdcContract.balanceOf(addr);
     return Number(ethers.formatUnits(balance, 6));
+  }
+
+  /**
+   * Check if address is oracle operator
+   */
+  async isOperator(address?: string): Promise<boolean> {
+    const addr = address || (this.signer ? await this.signer.getAddress() : null);
+    if (!addr) throw new RookError(ErrorCodes.NO_SIGNER);
+    
+    return this.oracleContract.operators(addr);
   }
 }
 

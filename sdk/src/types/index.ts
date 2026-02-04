@@ -12,6 +12,10 @@ export interface EscrowParams {
   requireChallenge?: boolean;
 }
 
+export type EscrowStatus = 'Active' | 'Released' | 'Refunded' | 'Disputed' | 'Challenged' | 'Unknown';
+
+export type RiskLevel = 'LOW' | 'STANDARD' | 'ELEVATED' | 'HIGH';
+
 export interface EscrowResult {
   id: string;
   buyer: string;
@@ -19,7 +23,7 @@ export interface EscrowResult {
   amount: number;
   job: string;
   threshold: number;
-  status: string;
+  status: EscrowStatus;
   createdAt?: number;
   expiresAt?: number;
   txHash?: string;
@@ -38,13 +42,13 @@ export interface VerificationResult {
   address: string;
   trust_score: number;
   breakdown: TrustScoreBreakdown;
-  risk_level: 'LOW' | 'STANDARD' | 'ELEVATED' | 'HIGH';
+  risk_level: RiskLevel;
   recommendation: string;
 }
 
 export interface ChallengeParams {
   escrowId: string;
-  stake?: number;
+  stake?: number;  // Ignored - contract uses fixed 5 USDC
   reason?: string;
 }
 
@@ -59,6 +63,38 @@ export interface ChallengeResult {
 
 export interface DisputeParams {
   escrowId: string;
-  evidence: string;  // IPFS hash
+  evidence: string;  // IPFS hash or text
   claim: string;
+}
+
+export interface DisputeResult {
+  escrowId: string;
+  winner: string;
+  amount: number;
+  reason: string;
+  txHash: string;
+}
+
+// Event types for listeners
+export interface EscrowCreatedEvent {
+  escrowId: string;
+  buyer: string;
+  seller: string;
+  amount: bigint;
+  trustThreshold: number;
+  expiresAt: number;
+}
+
+export interface EscrowReleasedEvent {
+  escrowId: string;
+  seller: string;
+  amount: bigint;
+  trustScore: number;
+}
+
+export interface ChallengeInitiatedEvent {
+  escrowId: string;
+  challenger: string;
+  stake: bigint;
+  deadline: number;
 }
