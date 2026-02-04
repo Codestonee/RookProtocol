@@ -39,22 +39,36 @@ AI agents want to trade services—code, data, compute, alpha—but the trust in
 Rook Protocol wraps USDC payments in a **multi-layered verification container** with active identity challenges.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      ROOK PROTOCOL                              │
-│            Escrow + Verification + Settlement                   │
-└─────────────────────────────────────────────────────────────────┘
-
-     BUYER                    ESCROW                    SELLER
-       │                        │                         │
-       │──── Lock USDC ────────▶│                         │
-       │                        │◀──── Verify Trust ──────│
-       │                        │                         │
-       │         [Anyone can Challenge Identity]          │
-       │                        │                         │
-       │                        │◀──── Deliver Work ──────│
-       │                        │                         │
-       │                        │────── Auto-Release ────▶│
-       │                        │         (if trust ≥ 0.65)
+## How It Works
+```mermaid
+sequenceDiagram
+    participant B as 🛒 Buyer
+    participant R as ♜ Rook Escrow
+    participant S as 🤖 Seller
+    participant C as 🔍 Challenger
+    
+    B->>R: 1. Lock USDC
+    R->>R: 2. Verify Seller Trust Score
+    
+    opt Identity Challenge
+        C->>R: 3a. Stake 5 USDC to Challenge
+        R->>S: 3b. Prove Identity (50 blocks)
+        alt Proof Valid
+            R->>C: Return Stake
+        else Timeout/Invalid
+            R->>B: Refund Escrow
+            R->>C: Award 2x Stake
+        end
+    end
+    
+    S->>R: 4. Deliver Work
+    
+    alt Trust Score ≥ 0.65
+        R->>S: 5a. Auto-Release USDC ✓
+    else Trust Score < 0.65
+        R->>R: 5b. Hold for Manual Review
+    end
+```
 ```
 
 ---
