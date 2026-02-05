@@ -20,13 +20,16 @@ contract RookOracle is Ownable {
     IERC8004Identity public identityRegistry;
     IERC8004Reputation public reputationRegistry;
     
-    // Weights (scaled to 100)
-    uint256 public constant WEIGHT_IDENTITY = 25;
-    uint256 public constant WEIGHT_REPUTATION = 25;
-    uint256 public constant WEIGHT_SYBIL = 20;
-    uint256 public constant WEIGHT_HISTORY = 20;
-    uint256 public constant WEIGHT_CHALLENGE = 10;
-    
+    // PR#3: Configurable weights (scaled to 100) - conservative defaults
+    uint256 public weightIdentity = 30;      // CHANGED from constant 25
+    uint256 public weightReputation = 30;    // CHANGED from constant 25
+    uint256 public weightSybil = 20;
+    uint256 public weightHistory = 15;       // CHANGED from constant 20
+    uint256 public weightChallenge = 5;      // CHANGED from constant 10
+
+    // SECURITY: Score staleness threshold (PR#1)
+    uint256 public constant MAX_SCORE_AGE = 1 hours;
+
     // Off-chain oracle operators
     mapping(address => bool) public operators;
     
@@ -51,14 +54,25 @@ contract RookOracle is Ownable {
     );
     
     event OperatorUpdated(address indexed operator, bool status);
-    
+
+    // PR#3: Weight configuration event
+    event WeightsUpdated(
+        uint256 identity,
+        uint256 reputation,
+        uint256 sybil,
+        uint256 history,
+        uint256 challenge
+    );
+
     // ═══════════════════════════════════════════════════════════════
     // ERRORS
     // ═══════════════════════════════════════════════════════════════
-    
+
     error NotOperator();
     error InvalidScore();
-    
+    error StaleScore();  // SECURITY: Added in PR#1
+    error InvalidWeights();  // PR#3: Weight validation
+
     // ═══════════════════════════════════════════════════════════════
     // MODIFIERS
     // ═══════════════════════════════════════════════════════════════
@@ -114,16 +128,23 @@ contract RookOracle is Ownable {
      * @notice Compute composite trust score
      * @param agent Agent address
      * @return Trust score (0-100)
+     * PR#3: Updated to use configurable weights
      */
     function computeTrustScore(address agent) public view returns (uint256) {
+        // SECURITY FIX (PR#1): Return conservative 0 for stale/missing data
+        if (lastUpdated[agent] == 0 || block.timestamp > lastUpdated[agent] + MAX_SCORE_AGE) {
+            return 0;
+        }
+
         uint256 historyScore = getHistoryScore(agent);
-        
+
+        // PR#3: Use configurable weights instead of constants
         return (
-            identityScores[agent] * WEIGHT_IDENTITY +
-            reputationScores[agent] * WEIGHT_REPUTATION +
-            sybilScores[agent] * WEIGHT_SYBIL +
-            historyScore * WEIGHT_HISTORY +
-            challengeBonuses[agent] * WEIGHT_CHALLENGE
+            identityScores[agent] * weightIdentity +
+            reputationScores[agent] * weightReputation +
+            sybilScores[agent] * weightSybil +
+            historyScore * weightHistory +
+            challengeBonuses[agent] * weightChallenge
         ) / 100;
     }
     
@@ -151,8 +172,22 @@ contract RookOracle is Ownable {
      */
     function triggerRelease(bytes32 escrowId) external onlyOperator {
         IRookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
-        uint256 trustScore = computeTrustScore(e.seller);
-        
+
+        // SECURITY FIX: Single staleness check to prevent TOCTOU
+        if (lastUpdated[e.seller] == 0 || block.timestamp > lastUpdated[e.seller] + MAX_SCORE_AGE) {
+            revert StaleScore();
+        }
+
+        // Compute score inline (we already verified freshness)
+        uint256 historyScore = getHistoryScore(e.seller);
+        uint256 trustScore = (
+            identityScores[e.seller] * weightIdentity +
+            reputationScores[e.seller] * weightReputation +
+            sybilScores[e.seller] * weightSybil +
+            historyScore * weightHistory +
+            challengeBonuses[e.seller] * weightChallenge
+        ) / 100;
+
         escrow.releaseEscrow(escrowId, trustScore);
     }
     
@@ -210,5 +245,34 @@ contract RookOracle is Ownable {
     ) external onlyOwner {
         identityRegistry = IERC8004Identity(_identity);
         reputationRegistry = IERC8004Reputation(_reputation);
+    }
+
+    /**
+     * @notice Update scoring weights (PR#3)
+     * @param _identity Weight for identity (0-100)
+     * @param _reputation Weight for reputation (0-100)
+     * @param _sybil Weight for sybil (0-100)
+     * @param _history Weight for history (0-100)
+     * @param _challenge Weight for challenge (0-100)
+     */
+    function setWeights(
+        uint256 _identity,
+        uint256 _reputation,
+        uint256 _sybil,
+        uint256 _history,
+        uint256 _challenge
+    ) external onlyOwner {
+        // Validate weights sum to 100
+        if (_identity + _reputation + _sybil + _history + _challenge != 100) {
+            revert InvalidWeights();
+        }
+
+        weightIdentity = _identity;
+        weightReputation = _reputation;
+        weightSybil = _sybil;
+        weightHistory = _history;
+        weightChallenge = _challenge;
+
+        emit WeightsUpdated(_identity, _reputation, _sybil, _history, _challenge);
     }
 }

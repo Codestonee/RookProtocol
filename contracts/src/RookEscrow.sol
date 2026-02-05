@@ -12,6 +12,26 @@ import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
  * @notice Trustless USDC escrow for AI agents with multi-layered verification
  * @dev Built for Circle USDC Hackathon on Moltbook
  * @custom:security-contact security@rook-protocol.xyz
+ *
+ * MEDIUM FIX: Timing Mechanism Clarification
+ * ============================================
+ * This contract uses TWO timing mechanisms intentionally:
+ *
+ * 1. TIMESTAMPS (block.timestamp):
+ *    - Escrow expiration (expiresAt)
+ *    - Oracle timeout (ORACLE_TIMEOUT)
+ *    - Dispute creation time
+ *    - Challenge cooldown
+ *    Used for: Long-duration timeouts where exact timing is less critical
+ *
+ * 2. BLOCK NUMBERS (block.number):
+ *    - Challenge deadline (CHALLENGE_BLOCKS = 50 blocks ~10 min)
+ *    - Challenge response window (CHALLENGE_RESPONSE_WINDOW = 25 blocks ~5 min)
+ *    Used for: Short-duration operations requiring predictable timing
+ *
+ * Rationale: Block numbers provide more predictable timing for time-sensitive
+ * operations like challenges (immune to timestamp manipulation within 900s rule).
+ * Timestamps are more intuitive for long-duration timeouts measured in hours/days.
  */
 contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     
@@ -184,7 +204,11 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     error OracleTimeoutNotMet();
     error TransferFailed();
     error ContractPaused();
-    
+    error ChallengeResponseWindowExpired();  // SECURITY: Added in PR#1
+    error EvidenceTooLong();                 // SECURITY: Added in PR#1
+    error EscrowExpired();                   // CRITICAL FIX: Expiration enforcement
+    error EscrowNotExpired();                // CRITICAL FIX: Expiration enforcement
+
     // ═══════════════════════════════════════════════════════════════
     // CONSTRUCTOR
     // ═══════════════════════════════════════════════════════════════
@@ -282,14 +306,19 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
+        // CRITICAL FIX: Enforce expiration
+        if (block.timestamp > escrow.expiresAt) revert EscrowExpired();
         if (trustScore < escrow.trustThreshold) revert BelowThreshold();
         
         escrow.status = EscrowStatus.Released;
         completedEscrows[escrow.seller]++;
-        
+
         bool success = usdc.transfer(escrow.seller, escrow.amount);
         if (!success) revert TransferFailed();
-        
+
+        // CRITICAL FIX: Clean up storage
+        _cleanupEscrowStorage(escrowId);
+
         emit EscrowReleased(escrowId, escrow.seller, escrow.amount, trustScore, keccak256("oracle_release"));
     }
     
@@ -302,6 +331,8 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
+        // CRITICAL FIX: Enforce expiration
+        if (block.timestamp > escrow.expiresAt) revert EscrowExpired();
         if (block.timestamp < escrow.createdAt + ORACLE_TIMEOUT) revert OracleTimeoutNotMet();
         
         // Either party can trigger release after timeout (mutual consent implied)
@@ -310,10 +341,13 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         
         escrow.status = EscrowStatus.Released;
         completedEscrows[escrow.seller]++;
-        
+
         bool success = usdc.transfer(escrow.seller, escrow.amount);
         if (!success) revert TransferFailed();
-        
+
+        // CRITICAL FIX: Clean up storage
+        _cleanupEscrowStorage(escrowId);
+
         emit EscrowReleased(escrowId, escrow.seller, escrow.amount, 0, keccak256("consent_release"));
     }
     
@@ -330,13 +364,41 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
         
         escrow.status = EscrowStatus.Refunded;
-        
+
         bool success = usdc.transfer(escrow.buyer, escrow.amount);
         if (!success) revert TransferFailed();
-        
+
+        // CRITICAL FIX: Clean up storage
+        _cleanupEscrowStorage(escrowId);
+
         emit EscrowRefunded(escrowId, escrow.buyer, escrow.amount, reason);
     }
-    
+
+    /**
+     * @notice Claim expired escrow (automatic refund to buyer)
+     * @param escrowId Escrow identifier
+     * @dev CRITICAL FIX: Allows buyer to reclaim funds after expiration
+     */
+    function claimExpired(bytes32 escrowId) external nonReentrant {
+        Escrow storage escrow = escrows[escrowId];
+        if (escrow.buyer == address(0)) revert EscrowNotFound();
+        if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
+        if (block.timestamp <= escrow.expiresAt) revert EscrowNotExpired();
+
+        // Only buyer can claim expired escrow
+        if (msg.sender != escrow.buyer) revert NotBuyer();
+
+        escrow.status = EscrowStatus.Refunded;
+
+        bool success = usdc.transfer(escrow.buyer, escrow.amount);
+        if (!success) revert TransferFailed();
+
+        // Clean up storage
+        _cleanupEscrowStorage(escrowId);
+
+        emit EscrowRefunded(escrowId, escrow.buyer, escrow.amount, "Expired");
+    }
+
     /**
      * @notice Escalate to dispute
      * @param escrowId Escrow identifier
@@ -347,11 +409,15 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         string calldata evidence
     ) external nonReentrant {
         Escrow storage escrow = escrows[escrowId];
+
+        // SECURITY FIX (PR#1): Validate evidence length to prevent gas griefing
+        if (bytes(evidence).length > 1000) revert EvidenceTooLong();
+
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active && escrow.status != EscrowStatus.Challenged) {
             revert EscrowNotActive();
         }
-        
+
         bool isParty = msg.sender == escrow.buyer || msg.sender == escrow.seller;
         if (!isParty) revert NotAuthorized();
         
@@ -395,10 +461,13 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         } else {
             escrow.status = EscrowStatus.Refunded;
         }
-        
+
         bool success = usdc.transfer(winner, escrow.amount);
         if (!success) revert TransferFailed();
-        
+
+        // CRITICAL FIX: Clean up storage
+        _cleanupEscrowStorage(escrowId);
+
         emit DisputeResolved(escrowId, winner, escrow.amount, reason);
     }
     
@@ -414,7 +483,9 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
-        
+        // CRITICAL FIX: Enforce expiration
+        if (block.timestamp > escrow.expiresAt) revert EscrowExpired();
+
         // Prevent self-challenge
         if (msg.sender == escrow.seller) revert SelfChallenge();
         
@@ -453,6 +524,8 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
      * @notice Respond to challenge (seller only)
      * @param escrowId Escrow identifier
      * @param responseHash Hash of response data (for oracle verification)
+     * @dev The oracle verifies this hash off-chain before calling resolveChallenge()
+     *      Expected format: keccak256(abi.encodePacked(escrowId, signature, timestamp))
      */
     function respondChallenge(
         bytes32 escrowId,
@@ -460,14 +533,21 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     ) external nonReentrant onlySeller(escrowId) {
         Escrow storage escrow = escrows[escrowId];
         Challenge storage challenge = challenges[escrowId];
-        
+
         if (escrow.status != EscrowStatus.Challenged) revert EscrowNotActive();
         if (challenge.status != ChallengeStatus.Active) revert ChallengeNotActive();
         if (block.number > challenge.deadline) revert ChallengeExpired();
-        
+
+        // HIGH-IMPACT FIX: Validate response hash is not empty
+        if (responseHash == bytes32(0)) revert InvalidAmount();
+
+        // SECURITY FIX (PR#1): Enforce response window (must respond within first 25 blocks)
+        uint256 responseDeadline = challenge.deadline - CHALLENGE_BLOCKS + CHALLENGE_RESPONSE_WINDOW;
+        if (block.number > responseDeadline) revert ChallengeResponseWindowExpired();
+
         challenge.status = ChallengeStatus.Responded;
         challenge.responseHash = responseHash;
-        
+
         emit ChallengeResponded(escrowId, responseHash);
     }
     
@@ -496,20 +576,26 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
             escrow.status = EscrowStatus.Active;
             bool success = usdc.transfer(challenge.challenger, challenge.stake);
             if (!success) revert TransferFailed();
-            
+
+            // CRITICAL FIX: Clean up challenge storage (escrow continues, but challenge is done)
+            delete challenges[escrowId];
+
             emit ChallengeResolved(escrowId, true, challenge.challenger, challenge.stake);
         } else {
             // Seller failed — return stake to challenger only, refund buyer
             escrow.status = EscrowStatus.Refunded;
-            
+
             // Refund buyer
             bool success1 = usdc.transfer(escrow.buyer, escrow.amount);
             if (!success1) revert TransferFailed();
-            
+
             // Return stake to challenger (NO 2x payout)
             bool success2 = usdc.transfer(challenge.challenger, challenge.stake);
             if (!success2) revert TransferFailed();
-            
+
+            // CRITICAL FIX: Clean up all storage (escrow is terminated)
+            _cleanupEscrowStorage(escrowId);
+
             emit ChallengeResolved(escrowId, false, challenge.challenger, challenge.stake);
         }
     }
@@ -521,10 +607,13 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function claimChallengeTimeout(bytes32 escrowId) external nonReentrant {
         Challenge storage challenge = challenges[escrowId];
         Escrow storage escrow = escrows[escrowId];
-        
+
+        // SECURITY FIX (PR#1): Only challenger can claim timeout
+        if (msg.sender != challenge.challenger) revert NotChallenger();
+
         if (challenge.status != ChallengeStatus.Active) revert ChallengeNotActive();
         if (block.number <= challenge.deadline) revert ChallengeNotExpired();
-        
+
         challenge.status = ChallengeStatus.Resolved;
         challenge.passed = false;
         escrow.status = EscrowStatus.Refunded;
@@ -532,11 +621,14 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         // Refund buyer
         bool success1 = usdc.transfer(escrow.buyer, escrow.amount);
         if (!success1) revert TransferFailed();
-        
+
         // Return stake to challenger (NO 2x payout)
         bool success2 = usdc.transfer(challenge.challenger, challenge.stake);
         if (!success2) revert TransferFailed();
-        
+
+        // CRITICAL FIX: Clean up all storage (escrow is terminated)
+        _cleanupEscrowStorage(escrowId);
+
         emit ChallengeResolved(escrowId, false, challenge.challenger, challenge.stake);
     }
     
@@ -555,7 +647,23 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function getDispute(bytes32 escrowId) external view returns (Dispute memory) {
         return disputes[escrowId];
     }
-    
+
+    /**
+     * @notice Verify challenge response hash format
+     * @param escrowId Escrow identifier
+     * @param signature Seller's signature
+     * @param timestamp Response timestamp
+     * @return Hash that should match challenge.responseHash
+     * @dev HIGH-IMPACT FIX: Helper for oracle to verify response integrity
+     */
+    function computeResponseHash(
+        bytes32 escrowId,
+        bytes calldata signature,
+        uint256 timestamp
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encodePacked(escrowId, signature, timestamp));
+    }
+
     function getBuyerEscrows(address buyer) external view returns (bytes32[] memory) {
         return buyerEscrows[buyer];
     }
@@ -568,7 +676,28 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         if (totalEscrows[agent] == 0) return 0;
         return (completedEscrows[agent] * 100) / totalEscrows[agent];
     }
-    
+
+    // ═══════════════════════════════════════════════════════════════
+    // INTERNAL HELPERS
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Clean up storage for finalized escrow
+     * @param escrowId Escrow identifier
+     * @dev CRITICAL FIX: Prevents unbounded storage growth
+     */
+    function _cleanupEscrowStorage(bytes32 escrowId) internal {
+        // Delete challenge data if exists
+        if (challenges[escrowId].challenger != address(0)) {
+            delete challenges[escrowId];
+        }
+
+        // Delete dispute data if exists
+        if (disputes[escrowId].disputer != address(0)) {
+            delete disputes[escrowId];
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // ADMIN
     // ═══════════════════════════════════════════════════════════════

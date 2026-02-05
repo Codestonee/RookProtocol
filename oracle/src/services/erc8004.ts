@@ -59,13 +59,14 @@ export class ERC8004Service {
 
   /**
    * Get reputation score from ERC-8004
+   * PR#3: Updated with conservative defaults and feedback penalty
    */
   async getReputationScore(agent: string): Promise<number> {
     if (!this.reputationContract) {
       logger.warn('ERC-8004 reputation contract not configured');
-      return 50;
+      return 40; // PR#3: CHANGED from 50 to 40
     }
-    
+
     try {
       const [reputation, feedbackCount, avgRating] = await Promise.all([
         this.reputationContract.getReputation(agent),
@@ -73,15 +74,23 @@ export class ERC8004Service {
         this.reputationContract.getAverageRating(agent)
       ]);
 
+      // PR#3: Require minimum feedback count for high scores
+      // HIGH-IMPACT FIX: Reduced penalty and capped to not overwhelm high reputation
+      const minFeedbackForFullScore = 5;
+      const feedbackPenalty = Number(feedbackCount) < minFeedbackForFullScore
+        ? Math.min((minFeedbackForFullScore - Number(feedbackCount)) * 3, 12) // -3 per missing feedback, max 12
+        : 0;
+
       // Normalize to 0-100
-      // reputation is already 0-100, avgRating is 0-5
       const normalizedRating = Number(avgRating) * 20; // Convert 0-5 to 0-100
-      
+
       // Weight: 70% reputation, 30% rating
-      return (Number(reputation) * 0.7 + normalizedRating * 0.3);
+      const baseScore = Number(reputation) * 0.7 + normalizedRating * 0.3;
+
+      return Math.max(0, Math.round(baseScore - feedbackPenalty));
     } catch (error) {
       logger.error('Error getting ERC-8004 reputation:', error);
-      return 50; // Neutral score on error
+      return 30; // PR#3: CHANGED from 50 to 30 (more conservative on error)
     }
   }
 

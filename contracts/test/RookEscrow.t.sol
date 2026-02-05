@@ -339,4 +339,204 @@ contract RookEscrowTest is Test {
         vm.expectRevert(RookEscrow.BelowThreshold.selector);
         escrow.releaseEscrow(escrowId, 60);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PR#2: SECURITY & EDGE CASE TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    function test_Revert_ReleaseEscrow_NotOracle() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Non-oracle tries to release
+        vm.prank(address(0x999));
+        vm.expectRevert(RookEscrow.NotOracle.selector);
+        escrow.releaseEscrow(escrowId, 70);
+    }
+
+    function test_Revert_OracleTimeoutNotMet() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Try to release with consent before timeout (should fail)
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.OracleTimeoutNotMet.selector);
+        escrow.releaseWithConsent(escrowId);
+    }
+
+    function test_Revert_ChallengeCooldownActive() public {
+        // Create two escrows
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash1 = keccak256("Job 1");
+        bytes32 jobHash2 = keccak256("Job 2");
+        usdc.approve(address(escrow), amount * 2);
+        bytes32 escrowId1 = escrow.createEscrow(seller, amount, jobHash1, 65);
+        bytes32 escrowId2 = escrow.createEscrow(seller, amount, jobHash2, 65);
+        vm.stopPrank();
+
+        // Challenge first escrow
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 10 * 10**6);
+        escrow.initiateChallenge(escrowId1);
+
+        // Try to challenge second escrow immediately (should fail due to cooldown)
+        vm.expectRevert(RookEscrow.ChallengeCooldownActive.selector);
+        escrow.initiateChallenge(escrowId2);
+        vm.stopPrank();
+    }
+
+    function test_Revert_RespondAfterDeadline() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Initiate challenge
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        // Fast forward past deadline
+        vm.roll(block.number + 51);
+
+        // Seller tries to respond after deadline (should fail)
+        vm.prank(seller);
+        vm.expectRevert(RookEscrow.ChallengeExpired.selector);
+        escrow.respondChallenge(escrowId, keccak256("Late response"));
+    }
+
+    function test_Revert_ResolveAfterDeadline() public {
+        // Create escrow and challenge
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        // Fast forward past deadline
+        vm.roll(block.number + 51);
+
+        // Oracle tries to resolve after deadline (should fail)
+        vm.expectRevert(RookEscrow.ChallengeExpired.selector);
+        escrow.resolveChallenge(escrowId, true);
+    }
+
+    function test_Revert_NonPartyDispute() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Random address tries to dispute (should fail)
+        vm.prank(address(0x999));
+        vm.expectRevert(RookEscrow.NotAuthorized.selector);
+        escrow.disputeEscrow(escrowId, "Not my business");
+    }
+
+    function test_Revert_DoubleReleaseFinalization() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Release once
+        oracle.updateScores(seller, 80, 80, 80, 0);
+        escrow.releaseEscrow(escrowId, 70);
+
+        // Try to release again (should fail)
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.releaseEscrow(escrowId, 70);
+    }
+
+    function test_Revert_ResponseWindowExpired() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Initiate challenge
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        // Fast forward past response window (block 26) but before deadline (block 50)
+        vm.roll(block.number + 26);
+
+        // Seller tries to respond after response window (should fail per PR#1)
+        vm.prank(seller);
+        vm.expectRevert(RookEscrow.ChallengeResponseWindowExpired.selector);
+        escrow.respondChallenge(escrowId, keccak256("Too late"));
+    }
+
+    function test_Revert_NonChallengerClaimTimeout() public {
+        // Create escrow and challenge
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        // Fast forward past deadline
+        vm.roll(block.number + 51);
+
+        // Random address tries to claim timeout (should fail per PR#1)
+        vm.prank(address(0x999));
+        vm.expectRevert(RookEscrow.NotChallenger.selector);
+        escrow.claimChallengeTimeout(escrowId);
+    }
+
+    function test_Revert_EvidenceTooLong() public {
+        // Create escrow
+        vm.startPrank(buyer);
+        uint256 amount = 100 * 10**6;
+        bytes32 jobHash = keccak256("Test job");
+        usdc.approve(address(escrow), amount);
+        bytes32 escrowId = escrow.createEscrow(seller, amount, jobHash, 65);
+        vm.stopPrank();
+
+        // Create evidence string longer than 1000 bytes
+        // Use a string that's exactly 1001 characters
+        string memory longEvidence = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.EvidenceTooLong.selector);
+        escrow.disputeEscrow(escrowId, longEvidence);
+    }
 }
