@@ -1,11 +1,10 @@
-````md
 <div align="center">
 
 # ♜ Rook Protocol
 
 ### Trustless USDC Escrow for AI Agents
 
-> *“Trust is good. Verification is better. Code is absolute.”*
+> *Trust is good. Verification is better. Code is absolute.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Hackathon](https://img.shields.io/badge/Circle-USDC%20Hackathon-00D4AA)](https://moltbook.com/m/usdc)
@@ -15,6 +14,7 @@
 [Documentation](https://rookprotocol.vibecode.run/) • [Live Demo](https://rookprotocol.vibecode.run/)
 
 </div>
+
 
 ---
 
