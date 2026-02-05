@@ -109,6 +109,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     mapping(address => uint256) public completedEscrows;
     mapping(address => uint256) public totalEscrows;
     mapping(address => uint256) public lastChallengeTime;  // Rate limiting
+    mapping(bytes32 => mapping(address => bool)) public releaseConsent;  // HIGH-IMPACT FIX: Two-party consent
     
     uint256 public escrowCount;
     uint256 public totalVolume;
@@ -208,6 +209,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     error EvidenceTooLong();                 // SECURITY: Added in PR#1
     error EscrowExpired();                   // CRITICAL FIX: Expiration enforcement
     error EscrowNotExpired();                // CRITICAL FIX: Expiration enforcement
+    error BothPartiesRequired();             // HIGH-IMPACT FIX: Mutual consent
 
     // ═══════════════════════════════════════════════════════════════
     // CONSTRUCTOR
@@ -335,9 +337,17 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         if (block.timestamp > escrow.expiresAt) revert EscrowExpired();
         if (block.timestamp < escrow.createdAt + ORACLE_TIMEOUT) revert OracleTimeoutNotMet();
         
-        // Either party can trigger release after timeout (mutual consent implied)
+        // HIGH-IMPACT FIX: Require BOTH parties to consent
         bool isParty = msg.sender == escrow.buyer || msg.sender == escrow.seller;
         if (!isParty) revert NotAuthorized();
+        
+        // Record this party's consent
+        releaseConsent[escrowId][msg.sender] = true;
+        
+        // Check if both parties have consented
+        if (!releaseConsent[escrowId][escrow.buyer] || !releaseConsent[escrowId][escrow.seller]) {
+            revert BothPartiesRequired();
+        }
         
         escrow.status = EscrowStatus.Released;
         completedEscrows[escrow.seller]++;
@@ -347,6 +357,9 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
 
         // CRITICAL FIX: Clean up storage
         _cleanupEscrowStorage(escrowId);
+        // Clean up consent tracking
+        delete releaseConsent[escrowId][escrow.buyer];
+        delete releaseConsent[escrowId][escrow.seller];
 
         emit EscrowReleased(escrowId, escrow.seller, escrow.amount, 0, keccak256("consent_release"));
     }
@@ -571,16 +584,20 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         challenge.status = ChallengeStatus.Resolved;
         challenge.passed = passed;
         
+        // HIGH-IMPACT FIX: Cache values before deletion to preserve event data
+        address cachedChallenger = challenge.challenger;
+        uint256 cachedStake = challenge.stake;
+        
         if (passed) {
             // Seller passed — return stake to challenger, continue escrow
             escrow.status = EscrowStatus.Active;
-            bool success = usdc.transfer(challenge.challenger, challenge.stake);
+            bool success = usdc.transfer(cachedChallenger, cachedStake);
             if (!success) revert TransferFailed();
 
             // CRITICAL FIX: Clean up challenge storage (escrow continues, but challenge is done)
             delete challenges[escrowId];
 
-            emit ChallengeResolved(escrowId, true, challenge.challenger, challenge.stake);
+            emit ChallengeResolved(escrowId, true, cachedChallenger, cachedStake);
         } else {
             // Seller failed — return stake to challenger only, refund buyer
             escrow.status = EscrowStatus.Refunded;
@@ -590,13 +607,13 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
             if (!success1) revert TransferFailed();
 
             // Return stake to challenger (NO 2x payout)
-            bool success2 = usdc.transfer(challenge.challenger, challenge.stake);
+            bool success2 = usdc.transfer(cachedChallenger, cachedStake);
             if (!success2) revert TransferFailed();
 
             // CRITICAL FIX: Clean up all storage (escrow is terminated)
             _cleanupEscrowStorage(escrowId);
 
-            emit ChallengeResolved(escrowId, false, challenge.challenger, challenge.stake);
+            emit ChallengeResolved(escrowId, false, cachedChallenger, cachedStake);
         }
     }
     
@@ -671,6 +688,51 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function getSellerEscrows(address seller) external view returns (bytes32[] memory) {
         return sellerEscrows[seller];
     }
+
+    /**
+     * @notice Get buyer escrows with pagination
+     * @param buyer Buyer address
+     * @param offset Starting index
+     * @param limit Maximum number of results
+     * @return Paginated array of escrow IDs
+     * @dev HIGH-IMPACT FIX: Prevents unbounded array returns at scale
+     */
+    function getBuyerEscrowsPaginated(
+        address buyer,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (bytes32[] memory) {
+        bytes32[] storage all = buyerEscrows[buyer];
+        if (offset >= all.length) return new bytes32[](0);
+        uint256 end = offset + limit > all.length ? all.length : offset + limit;
+        bytes32[] memory result = new bytes32[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            result[i - offset] = all[i];
+        }
+        return result;
+    }
+
+    /**
+     * @notice Get seller escrows with pagination
+     * @param seller Seller address
+     * @param offset Starting index
+     * @param limit Maximum number of results
+     * @return Paginated array of escrow IDs
+     */
+    function getSellerEscrowsPaginated(
+        address seller,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (bytes32[] memory) {
+        bytes32[] storage all = sellerEscrows[seller];
+        if (offset >= all.length) return new bytes32[](0);
+        uint256 end = offset + limit > all.length ? all.length : offset + limit;
+        bytes32[] memory result = new bytes32[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            result[i - offset] = all[i];
+        }
+        return result;
+    }
     
     function getCompletionRate(address agent) external view returns (uint256) {
         if (totalEscrows[agent] == 0) return 0;
@@ -692,8 +754,8 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
             delete challenges[escrowId];
         }
 
-        // Delete dispute data if exists
-        if (disputes[escrowId].disputer != address(0)) {
+        // CRITICAL FIX: Use correct field name (initiator, not disputer)
+        if (disputes[escrowId].initiator != address(0)) {
             delete disputes[escrowId];
         }
     }

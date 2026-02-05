@@ -14,9 +14,17 @@ export const config = {
   
   // Oracle settings
   updateInterval: parseInt(process.env.ORACLE_UPDATE_INTERVAL || '300000'),
-  minConfidence: parseFloat(process.env.ORACLE_MIN_CONFIDENCE || '0.7')
+  minConfidence: parseFloat(process.env.ORACLE_MIN_CONFIDENCE || '0.7'),
+
+  // MEDIUM FIX: API key for authentication
+  apiKey: process.env.ORACLE_API_KEY
 };
 
+// MEDIUM FIX: Warn instead of throw for read-only mode
 if (!config.privateKey) {
-  throw new Error('ORACLE_PRIVATE_KEY or PRIVATE_KEY environment variable required');
+  console.warn('⚠️ ORACLE_PRIVATE_KEY not set. Write operations (challenge resolution) will be disabled.');
+}
+
+if (!config.apiKey) {
+  console.warn('⚠️ ORACLE_API_KEY not set. Challenge endpoint will be unprotected.');
 }

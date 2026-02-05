@@ -104,13 +104,17 @@ export class RookProtocol {
     
     // Resolve recipient address
     const seller = await this.resolveAddress(params.recipient);
+    const escrowAddress = await this.escrowContract.getAddress();
     
-    // Approve USDC
-    const approveTx = await this.usdcContract.approve(
-      await this.escrowContract.getAddress(),
-      amount
+    // MEDIUM FIX: Check allowance before approving
+    const currentAllowance = await this.usdcContract.allowance(
+      await this.signer.getAddress(),
+      escrowAddress
     );
-    await approveTx.wait();
+    if (currentAllowance < amount) {
+      const approveTx = await this.usdcContract.approve(escrowAddress, amount);
+      await approveTx.wait();
+    }
     
     // Create escrow
     const tx = await this.escrowContract.createEscrow(
@@ -331,13 +335,17 @@ export class RookProtocol {
     // NOTE: Contract uses fixed CHALLENGE_STAKE (5 USDC)
     // We use the constant instead of params.stake to avoid approval mismatch
     const stakeAmount = CHALLENGE_STAKE;
+    const escrowAddress = await this.escrowContract.getAddress();
     
-    // Approve USDC for stake
-    const approveTx = await this.usdcContract.approve(
-      await this.escrowContract.getAddress(),
-      stakeAmount
+    // MEDIUM FIX: Check allowance before approving
+    const currentAllowance = await this.usdcContract.allowance(
+      await this.signer.getAddress(),
+      escrowAddress
     );
-    await approveTx.wait();
+    if (currentAllowance < stakeAmount) {
+      const approveTx = await this.usdcContract.approve(escrowAddress, stakeAmount);
+      await approveTx.wait();
+    }
     
     // Initiate challenge
     const tx = await this.escrowContract.initiateChallenge(params.escrowId);
@@ -360,18 +368,43 @@ export class RookProtocol {
    * Respond to challenge (seller only)
    * 
    * @param escrowId - Escrow identifier
-   * @param responseData - Response data (will be hashed)
-   * @returns Transaction hash
+   * @param responseData - Response data (will be included in signature)
+   * @returns Object with transaction hash and signature for oracle verification
+   * 
+   * @remarks CRITICAL FIX: Now uses contract-compatible hash format:
+   * keccak256(abi.encodePacked(escrowId, signature, timestamp))
    */
-  async respondChallenge(escrowId: string, responseData: string): Promise<string> {
+  async respondChallenge(escrowId: string, responseData: string): Promise<{txHash: string, signature: string, timestamp: number}> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
     
-    const responseHash = ethers.keccak256(ethers.toUtf8Bytes(responseData));
+    // CRITICAL FIX: Create signature that includes escrowId for verification
+    // The seller signs the escrowId to prove they control the wallet
+    const messageToSign = ethers.solidityPackedKeccak256(
+      ['bytes32', 'string'],
+      [escrowId, responseData]
+    );
+    const signature = await this.signer.signMessage(ethers.getBytes(messageToSign));
+    
+    // Use current timestamp
+    const timestamp = Math.floor(Date.now() / 1000);
+    
+    // CRITICAL FIX: Hash format matching contract's computeResponseHash
+    const responseHash = ethers.keccak256(
+      ethers.solidityPacked(
+        ['bytes32', 'bytes', 'uint256'],
+        [escrowId, signature, timestamp]
+      )
+    );
     
     const tx = await this.escrowContract.respondChallenge(escrowId, responseHash);
     const receipt = await tx.wait();
     
-    return receipt.hash;
+    // Return signature and timestamp for oracle verification
+    return {
+      txHash: receipt.hash,
+      signature,
+      timestamp
+    };
   }
 
   /**

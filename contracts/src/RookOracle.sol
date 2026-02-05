@@ -64,6 +64,10 @@ contract RookOracle is Ownable {
         uint256 challenge
     );
 
+    // HIGH-IMPACT FIX: Admin configuration events
+    event EscrowUpdated(address indexed oldEscrow, address indexed newEscrow);
+    event RegistriesUpdated(address indexed identity, address indexed reputation);
+
     // ═══════════════════════════════════════════════════════════════
     // ERRORS
     // ═══════════════════════════════════════════════════════════════
@@ -72,6 +76,7 @@ contract RookOracle is Ownable {
     error InvalidScore();
     error StaleScore();  // SECURITY: Added in PR#1
     error InvalidWeights();  // PR#3: Weight validation
+    error InvalidAddress();  // HIGH-IMPACT FIX: Zero-address validation
 
     // ═══════════════════════════════════════════════════════════════
     // MODIFIERS
@@ -236,15 +241,22 @@ contract RookOracle is Ownable {
     }
     
     function setEscrow(address _escrow) external onlyOwner {
+        // HIGH-IMPACT FIX: Zero-address validation
+        if (_escrow == address(0)) revert InvalidAddress();
+        address oldEscrow = address(escrow);
         escrow = IRookEscrow(_escrow);
+        emit EscrowUpdated(oldEscrow, _escrow);
     }
     
     function setRegistries(
         address _identity,
         address _reputation
     ) external onlyOwner {
+        // HIGH-IMPACT FIX: Zero-address validation
+        if (_identity == address(0) || _reputation == address(0)) revert InvalidAddress();
         identityRegistry = IERC8004Identity(_identity);
         reputationRegistry = IERC8004Reputation(_reputation);
+        emit RegistriesUpdated(_identity, _reputation);
     }
 
     /**
