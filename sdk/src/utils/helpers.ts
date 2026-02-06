@@ -69,11 +69,11 @@ export function computeCompositeScore(
   challenge: number
 ): number {
   return (
-    identity * 0.25 +
-    reputation * 0.25 +
+    identity * 0.30 +
+    reputation * 0.30 +
     sybil * 0.20 +
-    history * 0.20 +
-    challenge * 0.10
+    history * 0.15 +
+    challenge * 0.05
   );
 }
 

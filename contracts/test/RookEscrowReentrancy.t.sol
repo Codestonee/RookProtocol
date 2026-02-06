@@ -8,7 +8,7 @@ import "./mocks/MockUSDC.sol";
 
 /**
  * @title RookEscrowReentrancyTest
- * @notice PR#2: Tests for reentrancy protection
+ * @notice Tests for reentrancy protection on all state-changing functions
  * @dev All state-changing functions should be protected by ReentrancyGuard
  */
 contract RookEscrowReentrancyTest is Test {
@@ -22,14 +22,13 @@ contract RookEscrowReentrancyTest is Test {
     address public challenger = address(4);
 
     function setUp() public {
-        vm.startPrank(owner);
-
         usdc = new MockUSDC(1_000_000 * 10**6);
+
+        vm.startPrank(owner);
         oracle = new RookOracle(address(0));
         escrow = new RookEscrow(address(usdc), address(oracle));
         oracle.setEscrow(address(escrow));
         oracle.setOperator(address(this), true);
-
         vm.stopPrank();
 
         usdc.transfer(buyer, 10_000 * 10**6);
@@ -38,17 +37,13 @@ contract RookEscrowReentrancyTest is Test {
 
     /**
      * @notice Verify ReentrancyGuard is present on createEscrow
-     * @dev This test documents that standard ERC20 doesn't trigger reentrancy,
-     *      but the guard protects against malicious tokens
      */
     function test_ReentrancyGuard_CreateEscrow() public {
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
 
-        // This call succeeds - standard ERC20 doesn't allow reentrancy
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
 
-        // Verify escrow was created
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(e.buyer, buyer);
         assertEq(e.amount, 100 * 10**6);
@@ -56,42 +51,35 @@ contract RookEscrowReentrancyTest is Test {
     }
 
     /**
-     * @notice Verify ReentrancyGuard is present on releaseEscrow
-     * @dev The nonReentrant modifier prevents reentry during USDC transfer
+     * @notice Verify ReentrancyGuard is present on releaseEscrow (via oracle)
      */
     function test_ReentrancyGuard_ReleaseEscrow() public {
-        // Create escrow
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
         vm.stopPrank();
 
-        // Update scores and release
-        oracle.updateScores(seller, 80, 80, 80, 0);
+        // Update scores: (90*30 + 90*30 + 90*20 + 0*15 + 0*5) / 100 = 72 >= 65
+        oracle.updateScores(seller, 90, 90, 90, 0);
 
-        // This call succeeds - protected by nonReentrant
-        escrow.releaseEscrow(escrowId, 70);
+        // Release through oracle (nonReentrant on both oracle and escrow)
+        oracle.triggerRelease(escrowId);
 
-        // Verify release succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Released));
     }
 
     /**
      * @notice Verify ReentrancyGuard is present on refundEscrow
-     * @dev The nonReentrant modifier prevents reentry during refund
      */
     function test_ReentrancyGuard_RefundEscrow() public {
-        // Create escrow
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
 
-        // Refund (protected by nonReentrant)
         escrow.refundEscrow(escrowId, "Changed mind");
         vm.stopPrank();
 
-        // Verify refund succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Refunded));
     }
@@ -100,16 +88,13 @@ contract RookEscrowReentrancyTest is Test {
      * @notice Verify ReentrancyGuard is present on disputeEscrow
      */
     function test_ReentrancyGuard_DisputeEscrow() public {
-        // Create escrow
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
 
-        // Dispute (protected by nonReentrant)
         escrow.disputeEscrow(escrowId, "Dispute evidence");
         vm.stopPrank();
 
-        // Verify dispute succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Disputed));
     }
@@ -118,19 +103,16 @@ contract RookEscrowReentrancyTest is Test {
      * @notice Verify ReentrancyGuard is present on initiateChallenge
      */
     function test_ReentrancyGuard_InitiateChallenge() public {
-        // Create escrow
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
         vm.stopPrank();
 
-        // Initiate challenge (protected by nonReentrant)
         vm.startPrank(challenger);
         usdc.approve(address(escrow), 5 * 10**6);
         escrow.initiateChallenge(escrowId);
         vm.stopPrank();
 
-        // Verify challenge succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Challenged));
     }
@@ -139,7 +121,6 @@ contract RookEscrowReentrancyTest is Test {
      * @notice Verify ReentrancyGuard is present on respondChallenge
      */
     function test_ReentrancyGuard_RespondChallenge() public {
-        // Create escrow and challenge
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
@@ -150,20 +131,17 @@ contract RookEscrowReentrancyTest is Test {
         escrow.initiateChallenge(escrowId);
         vm.stopPrank();
 
-        // Respond to challenge (protected by nonReentrant)
         vm.prank(seller);
         escrow.respondChallenge(escrowId, keccak256("Response"));
 
-        // Verify response succeeded
         RookEscrow.Challenge memory c = escrow.getChallenge(escrowId);
         assertEq(uint8(c.status), uint8(RookEscrow.ChallengeStatus.Responded));
     }
 
     /**
-     * @notice Verify ReentrancyGuard is present on resolveChallenge
+     * @notice Verify ReentrancyGuard is present on resolveChallenge (via oracle)
      */
     function test_ReentrancyGuard_ResolveChallenge() public {
-        // Create escrow and challenge
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
@@ -177,20 +155,18 @@ contract RookEscrowReentrancyTest is Test {
         vm.prank(seller);
         escrow.respondChallenge(escrowId, keccak256("Response"));
 
-        // Resolve challenge (protected by nonReentrant)
-        escrow.resolveChallenge(escrowId, true);
+        // Resolve through oracle (nonReentrant on both)
+        oracle.resolveChallenge(escrowId, true);
 
-        // Verify resolution succeeded
-        RookEscrow.Challenge memory c = escrow.getChallenge(escrowId);
-        assertEq(uint8(c.status), uint8(RookEscrow.ChallengeStatus.Resolved));
-        assertTrue(c.passed);
+        // After passing, escrow goes back to Active and challenge is deleted
+        RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
+        assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Active));
     }
 
     /**
      * @notice Verify ReentrancyGuard is present on claimChallengeTimeout
      */
     function test_ReentrancyGuard_ClaimChallengeTimeout() public {
-        // Create escrow and challenge
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
@@ -204,11 +180,9 @@ contract RookEscrowReentrancyTest is Test {
         // Fast forward past deadline
         vm.roll(block.number + 51);
 
-        // Claim timeout (protected by nonReentrant)
         vm.prank(challenger);
         escrow.claimChallengeTimeout(escrowId);
 
-        // Verify timeout claim succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Refunded));
     }
@@ -217,27 +191,23 @@ contract RookEscrowReentrancyTest is Test {
      * @notice Verify ReentrancyGuard is present on resolveDispute
      */
     function test_ReentrancyGuard_ResolveDispute() public {
-        // Create escrow and dispute
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
         escrow.disputeEscrow(escrowId, "Dispute evidence");
         vm.stopPrank();
 
-        // Resolve dispute (protected by nonReentrant)
         vm.prank(owner);
         escrow.resolveDispute(escrowId, seller, "Resolved in favor of seller");
 
-        // Verify resolution succeeded
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Released));
     }
 
     /**
-     * @notice Verify ReentrancyGuard is present on releaseWithConsent
+     * @notice Verify ReentrancyGuard is present on releaseWithConsent (two-party)
      */
     function test_ReentrancyGuard_ReleaseWithConsent() public {
-        // Create escrow
         vm.startPrank(buyer);
         usdc.approve(address(escrow), 100 * 10**6);
         bytes32 escrowId = escrow.createEscrow(seller, 100 * 10**6, keccak256("Test"), 65);
@@ -246,11 +216,14 @@ contract RookEscrowReentrancyTest is Test {
         // Fast forward past oracle timeout
         vm.warp(block.timestamp + 1 days + 1);
 
-        // Release with consent (protected by nonReentrant)
+        // Buyer consents first (consent recorded but no release yet)
         vm.prank(buyer);
         escrow.releaseWithConsent(escrowId);
 
-        // Verify release succeeded
+        // Seller consents (now both have consented, succeeds)
+        vm.prank(seller);
+        escrow.releaseWithConsent(escrowId);
+
         RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Released));
     }

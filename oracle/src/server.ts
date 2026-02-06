@@ -1,16 +1,18 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { verifyHandler } from './handlers/verify';
-import { challengeHandler } from './handlers/challenge';
-import { webhookHandler } from './handlers/webhook';
+import { ethers } from 'ethers';
+import { createVerifyHandler } from './handlers/verify';
+import { createChallengeHandler } from './handlers/challenge';
+import { createWebhookHandler } from './handlers/webhook';
+import { ScoringService } from './services/scoring';
 import { logger } from './utils/logger';
 import { config } from './utils/config';
+import { metrics } from './monitoring/metrics';
 
-// MEDIUM FIX: API key authentication middleware
+// API key authentication middleware
 const apiKeyAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apiKey = req.headers['x-api-key'];
   if (!config.apiKey) {
-    // No API key configured, allow request (with warning logged at startup)
     return next();
   }
   if (!apiKey || apiKey !== config.apiKey) {
@@ -22,7 +24,7 @@ const apiKeyAuth = (req: express.Request, res: express.Response, next: express.N
 export async function createServer() {
   const app = express();
 
-  // MEDIUM FIX: Rate limiting (100 requests per minute)
+  // Rate limiting (100 requests per minute)
   const limiter = rateLimit({
     windowMs: 60 * 1000,
     max: 100,
@@ -34,23 +36,59 @@ export async function createServer() {
 
   // Logging middleware
   app.use((req, res, next) => {
-    logger.info(`${req.method} ${req.path}`);
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      logger.info(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+      metrics.record(`http:${req.method}:${req.path}`, duration, res.statusCode < 400);
+    });
     next();
   });
 
+  // Initialize shared provider and scoring service (singleton)
+  const provider = new ethers.JsonRpcProvider(
+    config.rpcUrl || 'https://sepolia.base.org'
+  );
+
+  let scoringService: ScoringService | null = null;
+  if (config.escrowAddress) {
+    scoringService = new ScoringService(
+      provider,
+      config.escrowAddress,
+      undefined,
+      undefined,
+      config.moltbookApiKey
+    );
+  } else {
+    logger.warn('ROOK_ESCROW_ADDRESS not configured. Scoring endpoints will return errors.');
+  }
+
   // Health check (public)
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'rook-oracle' });
+    res.json({
+      status: 'ok',
+      service: 'rook-oracle',
+      uptime: process.uptime(),
+      scoring: !!scoringService
+    });
+  });
+
+  // Metrics endpoint (requires API key)
+  app.get('/metrics', apiKeyAuth, (req, res) => {
+    res.json({
+      stats: metrics.getStats(),
+      cacheHitRate: metrics.getCacheHitRate()
+    });
   });
 
   // Verification endpoint (public, read-only)
-  app.post('/verify', verifyHandler);
+  app.post('/verify', createVerifyHandler(scoringService));
 
-  // Challenge endpoint (CRITICAL FIX: requires API key auth)
-  app.post('/challenge', apiKeyAuth, challengeHandler);
+  // Challenge endpoint (requires API key auth)
+  app.post('/challenge', apiKeyAuth, createChallengeHandler(provider, scoringService));
 
   // Webhook for blockchain events (requires API key auth)
-  app.post('/webhook', apiKeyAuth, webhookHandler);
+  app.post('/webhook', apiKeyAuth, createWebhookHandler(provider, scoringService));
 
   // Error handling
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

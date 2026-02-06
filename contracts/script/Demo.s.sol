@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/RookEscrow.sol";
 import "../src/RookOracle.sol";
-import "../test/mocks/MockUSDC.sol";
 
 /**
  * @notice Demo script showing a full escrow flow

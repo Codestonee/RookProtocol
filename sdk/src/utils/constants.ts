@@ -24,13 +24,13 @@ export const CHALLENGE_BLOCKS = 50;
 // Default escrow expiry (7 days in seconds)
 export const DEFAULT_EXPIRY = 7 * 24 * 60 * 60;
 
-// Score weights (must sum to 100)
+// Score weights (must sum to 100, matches RookOracle contract)
 export const SCORE_WEIGHTS = {
-  identity: 25,
-  reputation: 25,
+  identity: 30,
+  reputation: 30,
   sybil: 20,
-  history: 20,
-  challenge: 10
+  history: 15,
+  challenge: 5
 };
 
 // Risk levels
