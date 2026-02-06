@@ -8,7 +8,8 @@ import {
   TrustScoreBreakdown,
   RookConfig,
   EscrowStatus,
-  RiskLevel
+  RiskLevel,
+  AmountInput
 } from './types';
 import { CONTRACTS, DEFAULT_THRESHOLD, CHALLENGE_STAKE } from './utils/constants';
 import { RookError, ErrorCodes } from './utils/errors';
@@ -117,17 +118,68 @@ export class RookProtocol {
   // VALIDATION HELPERS
   // =================================================================
 
+  // Cache for oracle timeout (read from chain)
+  private oracleTimeoutCache: { value: number; timestamp: number } | null = null;
+  private readonly TIMEOUT_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+  /**
+   * Normalize amount input to bigint (USDC units with 6 decimals)
+   */
+  private normalizeAmount(amount: AmountInput): bigint {
+    if (typeof amount === 'bigint') {
+      return amount;
+    }
+    if (typeof amount === 'string') {
+      // Parse decimal string like "100.50"
+      return ethers.parseUnits(amount, 6);
+    }
+    if (typeof amount === 'number') {
+      if (isNaN(amount)) {
+        throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Amount is NaN');
+      }
+      return ethers.parseUnits(amount.toString(), 6);
+    }
+    throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Amount must be number, string, or bigint');
+  }
+
+  /**
+   * Get oracle timeout from chain (cached)
+   */
+  async getOracleTimeout(): Promise<number> {
+    // Return cached value if valid
+    if (this.oracleTimeoutCache && Date.now() - this.oracleTimeoutCache.timestamp < this.TIMEOUT_CACHE_TTL) {
+      return this.oracleTimeoutCache.value;
+    }
+
+    try {
+      const timeout = await this.escrowContract.ORACLE_TIMEOUT();
+      const value = Number(timeout);
+      this.oracleTimeoutCache = { value, timestamp: Date.now() };
+      return value;
+    } catch (error) {
+      // Fallback to 1 day if contract call fails
+      return 24 * 60 * 60;
+    }
+  }
+
   /**
    * Validate escrow parameters before creation
    */
-  private validateEscrowParams(params: EscrowParams): void {
-    if (typeof params.amount !== 'number' || isNaN(params.amount)) {
-      throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Amount must be a valid number');
+  private validateEscrowParams(params: EscrowParams): bigint {
+    // Normalize and validate amount
+    let amountBigInt: bigint;
+    try {
+      amountBigInt = this.normalizeAmount(params.amount);
+    } catch (error) {
+      throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Invalid amount format');
     }
-    if (params.amount <= 0) {
+
+    if (amountBigInt <= 0n) {
       throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Amount must be greater than 0');
     }
-    if (params.amount > 1_000_000) {
+
+    const maxAmount = ethers.parseUnits('1000000', 6); // 1M USDC
+    if (amountBigInt > maxAmount) {
       throw new RookError(ErrorCodes.INVALID_AMOUNT, 'Amount exceeds maximum (1M USDC)');
     }
 
@@ -146,6 +198,8 @@ export class RookProtocol {
     if (threshold < 50 || threshold > 100) {
       throw new RookError(ErrorCodes.INVALID_THRESHOLD, 'Threshold must be between 50 and 100');
     }
+
+    return amountBigInt;
   }
 
   /**
@@ -208,9 +262,8 @@ export class RookProtocol {
   async createEscrow(params: EscrowParams): Promise<EscrowResult> {
     if (!this.signer) throw new RookError(ErrorCodes.NO_SIGNER);
 
-    this.validateEscrowParams(params);
-
-    const amount = ethers.parseUnits(params.amount.toString(), 6);
+    // Validate and normalize amount
+    const amount = this.validateEscrowParams(params);
     const jobHash = ethers.keccak256(ethers.toUtf8Bytes(params.job));
     const threshold = params.threshold || DEFAULT_THRESHOLD;
 
@@ -245,9 +298,10 @@ export class RookProtocol {
 
     const receipt = await this.waitForTransaction(txPromise, 'Escrow creation');
 
-    // Parse escrow ID from event
+    // Parse escrow ID from event (filter by contract address to prevent hijacking)
     const iface = this.escrowContract.interface;
     const escrowCreatedEvent = receipt.logs
+      .filter((log: any) => log.address.toLowerCase() === escrowAddress.toLowerCase())
       .map((log: any) => {
         try {
           return iface.parseLog(log);
@@ -267,7 +321,7 @@ export class RookProtocol {
       id: escrowId,
       buyer: buyerAddress,
       seller,
-      amount: params.amount,
+      amount: Number(ethers.formatUnits(amount, 6)),
       job: params.job,
       threshold,
       status: 'Active' as EscrowStatus,
@@ -324,9 +378,10 @@ export class RookProtocol {
         `Escrow is ${escrow.status.toLowerCase()}, not active`);
     }
 
-    const ONE_DAY = 24 * 60 * 60;
-    if (escrow.createdAt && (Date.now() / 1000 - escrow.createdAt < ONE_DAY)) {
-      const hoursRemaining = Math.ceil((ONE_DAY - (Date.now() / 1000 - escrow.createdAt)) / 3600);
+    // Get oracle timeout from chain (cached)
+    const oracleTimeout = await this.getOracleTimeout();
+    if (escrow.createdAt && (Date.now() / 1000 - escrow.createdAt < oracleTimeout)) {
+      const hoursRemaining = Math.ceil((oracleTimeout - (Date.now() / 1000 - escrow.createdAt)) / 3600);
       throw new RookError(ErrorCodes.UNAUTHORIZED,
         `Oracle timeout not met. Wait ${hoursRemaining} more hours.`);
     }

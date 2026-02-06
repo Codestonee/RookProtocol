@@ -39,6 +39,8 @@ interface IRookEscrow {
     // Disputes
     function disputeEscrow(bytes32 escrowId, string calldata evidence) external;
     function resolveDispute(bytes32 escrowId, address winner, string calldata reason) external;
+    function executeDisputeResolution(bytes32 escrowId) external;
+    function cancelDisputeResolution(bytes32 escrowId) external;
 
     // Challenges
     function initiateChallenge(bytes32 escrowId) external;

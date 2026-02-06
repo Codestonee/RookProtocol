@@ -21,6 +21,11 @@ interface IRookOracle {
 
     // Score queries
     function computeTrustScore(address agent) external view returns (uint256);
+    function computeTrustScoreWithStaleness(address agent) external view returns (
+        uint256 score,
+        bool isStale,
+        uint256 lastUpdate
+    );
     function getHistoryScore(address agent) external view returns (uint256);
     function isScoreFresh(address agent) external view returns (bool);
 

@@ -14,6 +14,52 @@ const escrowAbi = [
   'function getEscrow(bytes32 escrowId) view returns (tuple(address buyer, address seller, uint256 amount, bytes32 jobHash, uint256 trustThreshold, uint8 status, uint256 createdAt, uint256 expiresAt))'
 ];
 
+// Escrow status enum (matches contract)
+enum EscrowStatus {
+  Active = 0,
+  Released = 1,
+  Refunded = 2,
+  Disputed = 3,
+  Challenged = 4
+}
+
+// LRU cache for idempotency (prevents duplicate event processing)
+const CACHE_MAX_SIZE = 1000;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+interface CacheEntry {
+  timestamp: number;
+}
+
+const processedEvents = new Map<string, CacheEntry>();
+
+function generateEventId(event: string, data: any): string {
+  // Create unique ID from event type and key data fields
+  const key = `${event}:${data.escrowId || ''}:${data.timestamp || Date.now()}`;
+  return key;
+}
+
+function isEventProcessed(eventId: string): boolean {
+  const entry = processedEvents.get(eventId);
+  if (!entry) return false;
+
+  // Check if entry has expired
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    processedEvents.delete(eventId);
+    return false;
+  }
+  return true;
+}
+
+function markEventProcessed(eventId: string): void {
+  // Evict oldest entries if cache is full
+  if (processedEvents.size >= CACHE_MAX_SIZE) {
+    const oldestKey = processedEvents.keys().next().value;
+    if (oldestKey) processedEvents.delete(oldestKey);
+  }
+  processedEvents.set(eventId, { timestamp: Date.now() });
+}
+
 export function createWebhookHandler(provider: ethers.Provider, scoring: ScoringService | null) {
   return async function webhookHandler(req: Request, res: Response) {
     try {
@@ -21,6 +67,13 @@ export function createWebhookHandler(provider: ethers.Provider, scoring: Scoring
 
       if (!event || !data) {
         return res.status(400).json({ error: 'event and data required' });
+      }
+
+      // Idempotency check - skip if event already processed
+      const eventId = generateEventId(event, data);
+      if (isEventProcessed(eventId)) {
+        logger.info(`Skipping duplicate event: ${eventId}`);
+        return res.json({ received: true, duplicate: true });
       }
 
       logger.info(`Received webhook: ${event}`, { data });
@@ -43,9 +96,13 @@ export function createWebhookHandler(provider: ethers.Provider, scoring: Scoring
           logger.warn(`Unknown webhook event: ${event}`);
       }
 
+      // Mark event as processed after successful handling
+      markEventProcessed(eventId);
+
       res.json({ received: true });
     } catch (error: any) {
       logger.error('Webhook handler error:', error);
+      metrics.record(`webhook:error`, 0, false);
       // Always return 200 to prevent retries
       res.json({ received: true, error: error.message });
     }
@@ -114,6 +171,14 @@ async function handleReleaseRequested(
 
     if (escrow.seller === ethers.ZeroAddress) {
       logger.warn(`Escrow ${data.escrowId} not found`);
+      return;
+    }
+
+    // Verify escrow is in Active state before attempting release
+    const status = Number(escrow.status);
+    if (status !== EscrowStatus.Active) {
+      const statusName = EscrowStatus[status] || `Unknown(${status})`;
+      logger.warn(`Escrow ${data.escrowId} not active (status: ${statusName}). Skipping release.`);
       return;
     }
 

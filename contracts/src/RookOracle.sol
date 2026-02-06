@@ -19,6 +19,9 @@ contract RookOracle is Ownable, ReentrancyGuard {
     // =================================================================
 
     IRookEscrow public escrow;
+
+    // NOTE: These registries are placeholders for future ERC-8004 identity/reputation
+    // integration. Currently, scores are updated off-chain via updateScores().
     IERC8004Identity public identityRegistry;
     IERC8004Reputation public reputationRegistry;
 
@@ -217,6 +220,29 @@ contract RookOracle is Ownable, ReentrancyGuard {
             historyScore * weightHistory +
             effectiveChallengeBonus * weightChallenge
         ) / 100;
+    }
+
+    /**
+     * @notice Compute trust score with explicit staleness indicator
+     * @param agent Agent address
+     * @return score Trust score (0-100), returns 0 if stale
+     * @return isStale True if score is stale or missing
+     * @return lastUpdate Timestamp of last score update (0 if never updated)
+     */
+    function computeTrustScoreWithStaleness(address agent) public view returns (
+        uint256 score,
+        bool isStale,
+        uint256 lastUpdate
+    ) {
+        lastUpdate = lastUpdated[agent];
+        isStale = lastUpdate == 0 || block.timestamp > lastUpdate + MAX_SCORE_AGE;
+
+        if (isStale) {
+            return (0, true, lastUpdate);
+        }
+
+        score = computeTrustScore(agent);
+        return (score, false, lastUpdate);
     }
 
     /**

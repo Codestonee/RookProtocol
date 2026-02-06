@@ -325,11 +325,16 @@ contract RookEscrowTest is Test {
         escrow.respondChallenge(escrowId, keccak256("I am real"));
 
         // Resolve challenge (seller passes) - must come from oracle
+        // NOTE: With stake slashing, challenger only gets 50% back (2.5 USDC)
+        // The other 50% goes to seller as reward for wrongful challenge
         uint256 challengerBefore = usdc.balanceOf(challenger);
+        uint256 sellerBefore = usdc.balanceOf(seller);
         vm.prank(address(oracle));
         escrow.resolveChallenge(escrowId, true);
 
-        assertEq(usdc.balanceOf(challenger) - challengerBefore, 5 * 10**6);
+        uint256 expectedReturn = (5 * 10**6 * 50) / 100; // 50% = 2.5 USDC
+        assertEq(usdc.balanceOf(challenger) - challengerBefore, expectedReturn);
+        assertEq(usdc.balanceOf(seller) - sellerBefore, 5 * 10**6 - expectedReturn);
 
         e = escrow.getEscrow(escrowId);
         assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Active));
@@ -784,6 +789,366 @@ contract RookEscrowTest is Test {
             assertEq(usdc.balanceOf(owner) - feeBefore, expectedFee);
         }
         assertEq(usdc.balanceOf(seller) - sellerBefore, 1000 * 10**6 - expectedFee);
+    }
+
+    // =================================================================
+    // ADDITIONAL TIMELOCK TESTS
+    // =================================================================
+
+    function test_TimelockAlreadyExecuted() public {
+        address newOracle = address(0xBEEF);
+
+        vm.startPrank(owner);
+        escrow.scheduleSetOracle(newOracle);
+        bytes32 actionId = keccak256(abi.encodePacked("setOracle", newOracle, block.timestamp));
+
+        vm.warp(block.timestamp + 2 days + 1);
+        escrow.executeSetOracle(actionId, newOracle);
+
+        // Try to execute again
+        vm.expectRevert(RookEscrow.TimelockAlreadyExecuted.selector);
+        escrow.executeSetOracle(actionId, newOracle);
+        vm.stopPrank();
+    }
+
+    function test_CancelTimelock() public {
+        address newOracle = address(0xBEEF);
+
+        vm.startPrank(owner);
+        escrow.scheduleSetOracle(newOracle);
+        bytes32 actionId = keccak256(abi.encodePacked("setOracle", newOracle, block.timestamp));
+
+        // Cancel the timelock
+        escrow.cancelTimelock(actionId);
+
+        // Try to execute after cancel
+        vm.warp(block.timestamp + 2 days + 1);
+        vm.expectRevert(RookEscrow.TimelockNotFound.selector);
+        escrow.executeSetOracle(actionId, newOracle);
+        vm.stopPrank();
+    }
+
+    function test_TimelockExecuteWithoutSchedule() public {
+        address newOracle = address(0xBEEF);
+        bytes32 fakeActionId = keccak256(abi.encodePacked("setOracle", newOracle, block.timestamp));
+
+        vm.prank(owner);
+        vm.expectRevert(RookEscrow.TimelockNotFound.selector);
+        escrow.executeSetOracle(fakeActionId, newOracle);
+    }
+
+    // =================================================================
+    // ADDITIONAL PAUSE TESTS
+    // =================================================================
+
+    function test_Unpause() public {
+        vm.prank(owner);
+        escrow.pause();
+
+        // Verify paused
+        vm.startPrank(buyer);
+        usdc.approve(address(escrow), 100 * 10**6);
+        vm.expectRevert();
+        escrow.createEscrow(seller, 100 * 10**6, keccak256("Job"), 65);
+        vm.stopPrank();
+
+        // Unpause
+        vm.prank(owner);
+        escrow.unpause();
+
+        // Should work now
+        vm.startPrank(buyer);
+        bytes32 id = escrow.createEscrow(seller, 100 * 10**6, keccak256("Job"), 65);
+        assertTrue(id != bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_PauseBlocksRelease() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+        oracle.updateScores(seller, 80, 80, 80, 0);
+
+        vm.prank(owner);
+        escrow.pause();
+
+        vm.prank(address(oracle));
+        vm.expectRevert();
+        escrow.releaseEscrow(escrowId, 70);
+    }
+
+    function test_PauseBlocksRefund() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(owner);
+        escrow.pause();
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        escrow.refundEscrow(escrowId, "Test refund");
+    }
+
+    function test_PauseBlocksDispute() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(owner);
+        escrow.pause();
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        escrow.disputeEscrow(escrowId, "Evidence");
+    }
+
+    function test_Revert_NonOwnerCannotPause() public {
+        vm.prank(buyer);
+        vm.expectRevert();
+        escrow.pause();
+    }
+
+    function test_Revert_NonOwnerCannotUnpause() public {
+        vm.prank(owner);
+        escrow.pause();
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        escrow.unpause();
+    }
+
+    // =================================================================
+    // DISPUTE RESOLUTION TESTS
+    // =================================================================
+
+    function test_DisputeResolve_BuyerWins() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(buyer);
+        escrow.disputeEscrow(escrowId, "Buyer evidence");
+
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+
+        vm.prank(owner);
+        escrow.resolveDispute(escrowId, buyer, "Buyer wins");
+
+        uint256 buyerAfter = usdc.balanceOf(buyer);
+        assertEq(buyerAfter - buyerBefore, 100 * 10**6);
+
+        RookEscrow.Escrow memory e = escrow.getEscrow(escrowId);
+        assertEq(uint8(e.status), uint8(RookEscrow.EscrowStatus.Refunded));
+    }
+
+    // =================================================================
+    // STAKE SLASHING TESTS
+    // =================================================================
+
+    function test_ChallengeSlashing_SellerPasses() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        uint256 challengerBefore = usdc.balanceOf(challenger);
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        // Oracle resolves - seller passes (vindicated)
+        vm.prank(address(oracle));
+        escrow.resolveChallenge(escrowId, true);
+
+        uint256 challengerAfter = usdc.balanceOf(challenger);
+        uint256 sellerAfter = usdc.balanceOf(seller);
+
+        // Challenger gets 50% back (2.5 USDC)
+        uint256 expectedReturn = (5 * 10**6 * 50) / 100;
+        assertEq(challengerAfter - challengerBefore, expectedReturn);
+
+        // Seller gets 50% as reward (2.5 USDC)
+        uint256 expectedReward = 5 * 10**6 - expectedReturn;
+        assertEq(sellerAfter - sellerBefore, expectedReward);
+    }
+
+    function test_ChallengeNoSlashing_SellerFails() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        uint256 challengerBefore = usdc.balanceOf(challenger);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+
+        // Oracle resolves - seller fails
+        vm.prank(address(oracle));
+        escrow.resolveChallenge(escrowId, false);
+
+        uint256 challengerAfter = usdc.balanceOf(challenger);
+        uint256 buyerAfter = usdc.balanceOf(buyer);
+
+        // Challenger gets full stake back (no slashing)
+        assertEq(challengerAfter - challengerBefore, 5 * 10**6);
+
+        // Buyer gets refund
+        assertEq(buyerAfter - buyerBefore, 100 * 10**6);
+    }
+
+    // =================================================================
+    // DISPUTE TIMELOCK TESTS
+    // =================================================================
+
+    function test_DisputeTimelock_HighValue() public {
+        // Create high-value escrow (> 10,000 USDC)
+        vm.startPrank(buyer);
+        usdc.approve(address(escrow), 15_000 * 10**6);
+
+        // Need more funds
+        vm.stopPrank();
+        usdc.transfer(buyer, 15_000 * 10**6);
+        vm.startPrank(buyer);
+
+        usdc.approve(address(escrow), 15_000 * 10**6);
+        bytes32 escrowId = escrow.createEscrow(seller, 15_000 * 10**6, keccak256("High value job"), 65);
+        vm.stopPrank();
+
+        // Dispute
+        vm.prank(buyer);
+        escrow.disputeEscrow(escrowId, "Dispute evidence");
+
+        // Resolve - should be timelocked
+        vm.prank(owner);
+        escrow.resolveDispute(escrowId, seller, "Seller wins");
+
+        // Verify pending resolution exists
+        (address winner, , uint256 executeAfter, bool executed) = escrow.pendingDisputeResolutions(escrowId);
+        assertEq(winner, seller);
+        assertGt(executeAfter, block.timestamp);
+        assertFalse(executed);
+
+        // Should not be executable yet
+        vm.prank(owner);
+        vm.expectRevert(RookEscrow.DisputeResolutionNotReady.selector);
+        escrow.executeDisputeResolution(escrowId);
+
+        // Advance time
+        vm.warp(executeAfter + 1);
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        // Now execute
+        vm.prank(owner);
+        escrow.executeDisputeResolution(escrowId);
+
+        uint256 sellerAfter = usdc.balanceOf(seller);
+        assertEq(sellerAfter - sellerBefore, 15_000 * 10**6);
+    }
+
+    function test_DisputeTimelock_LowValue_Immediate() public {
+        // Create low-value escrow (< 10,000 USDC)
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(buyer);
+        escrow.disputeEscrow(escrowId, "Dispute evidence");
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        // Resolve - should execute immediately (no timelock)
+        vm.prank(owner);
+        escrow.resolveDispute(escrowId, seller, "Seller wins");
+
+        uint256 sellerAfter = usdc.balanceOf(seller);
+        assertEq(sellerAfter - sellerBefore, 100 * 10**6);
+    }
+
+    function test_CancelDisputeResolution() public {
+        // Create high-value escrow
+        vm.stopPrank();
+        usdc.transfer(buyer, 15_000 * 10**6);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(escrow), 15_000 * 10**6);
+        bytes32 escrowId = escrow.createEscrow(seller, 15_000 * 10**6, keccak256("High value"), 65);
+        escrow.disputeEscrow(escrowId, "Evidence");
+        vm.stopPrank();
+
+        // Schedule resolution
+        vm.prank(owner);
+        escrow.resolveDispute(escrowId, seller, "Seller wins");
+
+        // Cancel
+        vm.prank(owner);
+        escrow.cancelDisputeResolution(escrowId);
+
+        // Verify cancelled
+        vm.prank(owner);
+        vm.expectRevert(RookEscrow.DisputeResolutionNotFound.selector);
+        escrow.executeDisputeResolution(escrowId);
+    }
+
+    // =================================================================
+    // EDGE CASE TESTS
+    // =================================================================
+
+    function test_Revert_RefundThenDispute() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        // Refund first
+        vm.prank(buyer);
+        escrow.refundEscrow(escrowId, "Refunding");
+
+        // Try to dispute after refund
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.disputeEscrow(escrowId, "Evidence");
+    }
+
+    function test_Revert_ChallengeThenRefund() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        // Challenge first
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+
+        // Try to refund while challenged
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.refundEscrow(escrowId, "Refunding");
+    }
+
+    function test_Revert_DisputeThenChallenge() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        // Dispute first
+        vm.prank(buyer);
+        escrow.disputeEscrow(escrowId, "Evidence");
+
+        // Try to challenge after dispute
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), 5 * 10**6);
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.initiateChallenge(escrowId);
+        vm.stopPrank();
+    }
+
+    function test_Revert_DoubleRefund() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(buyer);
+        escrow.refundEscrow(escrowId, "First refund");
+
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.refundEscrow(escrowId, "Second refund");
+    }
+
+    function test_Revert_DoubleDispute() public {
+        bytes32 escrowId = _createEscrow(100 * 10**6, 65);
+
+        vm.prank(buyer);
+        escrow.disputeEscrow(escrowId, "First dispute");
+
+        vm.prank(buyer);
+        vm.expectRevert(RookEscrow.EscrowNotActive.selector);
+        escrow.disputeEscrow(escrowId, "Second dispute");
     }
 
     // =================================================================

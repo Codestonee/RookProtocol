@@ -90,6 +90,14 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         bool executed;
     }
 
+    // Pending dispute resolution (for high-value disputes)
+    struct PendingDisputeResolution {
+        address winner;
+        string reason;
+        uint256 executeAfter;
+        bool executed;
+    }
+
     // =================================================================
     // STATE
     // =================================================================
@@ -101,6 +109,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant CHALLENGE_STAKE = 5 * 10**6;  // 5 USDC
     uint256 public constant CHALLENGE_BLOCKS = 50;         // ~2 min on Base
     uint256 public constant CHALLENGE_RESPONSE_WINDOW = 25; // ~1 min to respond
+    uint256 public constant CHALLENGE_SLASH_PERCENT = 50;  // 50% stake slashed on failed challenge
 
     // Escrow configuration
     uint256 public constant MIN_THRESHOLD = 50;
@@ -117,6 +126,11 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     // Admin timelock
     uint256 public constant TIMELOCK_DELAY = 2 days;
     mapping(bytes32 => TimelockAction) public timelockActions;
+
+    // Dispute timelock for high-value disputes
+    uint256 public constant DISPUTE_TIMELOCK_THRESHOLD = 10_000 * 10**6;  // 10,000 USDC
+    uint256 public constant DISPUTE_TIMELOCK_DELAY = 24 hours;
+    mapping(bytes32 => PendingDisputeResolution) public pendingDisputeResolutions;
 
     // Storage
     mapping(bytes32 => Escrow) public escrows;
@@ -194,6 +208,13 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         uint256 stakeReturned
     );
 
+    event ChallengeStakeSlashed(
+        bytes32 indexed escrowId,
+        address indexed challenger,
+        address indexed seller,
+        uint256 slashedAmount
+    );
+
     event OracleUpdated(address indexed oldOracle, address indexed newOracle);
     event ConsentRecorded(bytes32 indexed escrowId, address indexed party);
     event ProtocolFeeUpdated(uint256 oldFee, uint256 newFee);
@@ -203,6 +224,8 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     event TimelockScheduled(bytes32 indexed actionId, uint256 executeAfter);
     event TimelockExecuted(bytes32 indexed actionId);
     event TimelockCancelled(bytes32 indexed actionId);
+    event DisputeResolutionScheduled(bytes32 indexed escrowId, address indexed winner, uint256 executeAfter);
+    event DisputeResolutionCancelled(bytes32 indexed escrowId);
 
     // =================================================================
     // ERRORS
@@ -244,6 +267,10 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     error TimelockNotFound();
     error TimelockAlreadyExecuted();
     error InvalidResponseHash();
+    error DisputeResolutionPending();
+    error DisputeResolutionNotFound();
+    error DisputeResolutionNotReady();
+    error DisputeResolutionAlreadyExecuted();
 
     // =================================================================
     // CONSTRUCTOR
@@ -339,7 +366,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function releaseEscrow(
         bytes32 escrowId,
         uint256 trustScore
-    ) external nonReentrant onlyOracle {
+    ) external nonReentrant onlyOracle whenNotPaused {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
@@ -366,7 +393,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
      * @param escrowId Escrow identifier
      * @dev Requires BOTH parties to call this function to consent
      */
-    function releaseWithConsent(bytes32 escrowId) external nonReentrant {
+    function releaseWithConsent(bytes32 escrowId) external nonReentrant whenNotPaused {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.buyer == address(0)) revert EscrowNotFound();
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
@@ -411,7 +438,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function refundEscrow(
         bytes32 escrowId,
         string calldata reason
-    ) external nonReentrant onlyBuyer(escrowId) {
+    ) external nonReentrant onlyBuyer(escrowId) whenNotPaused {
         Escrow storage escrow = escrows[escrowId];
         if (escrow.status != EscrowStatus.Active) revert EscrowNotActive();
 
@@ -454,7 +481,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function disputeEscrow(
         bytes32 escrowId,
         string calldata evidence
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         Escrow storage escrow = escrows[escrowId];
 
         if (bytes(evidence).length > MAX_EVIDENCE_LENGTH) revert EvidenceTooLong();
@@ -480,7 +507,8 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     }
 
     /**
-     * @notice Resolve a dispute (owner only - emergency path, subject to timelock for large amounts)
+     * @notice Resolve a dispute (owner only)
+     * @dev High-value disputes (> 10,000 USDC) are timelocked for 24 hours
      * @param escrowId Escrow identifier
      * @param winner Address to receive funds
      * @param reason Resolution reason
@@ -489,13 +517,68 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         bytes32 escrowId,
         address winner,
         string calldata reason
-    ) external nonReentrant onlyOwner {
+    ) external nonReentrant onlyOwner whenNotPaused {
         Escrow storage escrow = escrows[escrowId];
         Dispute storage dispute = disputes[escrowId];
 
         if (escrow.status != EscrowStatus.Disputed) revert EscrowNotDisputed();
         if (dispute.resolved) revert DisputeAlreadyResolved();
         if (winner != escrow.buyer && winner != escrow.seller) revert NotAuthorized();
+        if (pendingDisputeResolutions[escrowId].executeAfter > 0) revert DisputeResolutionPending();
+
+        // High-value disputes require timelock
+        if (escrow.amount >= DISPUTE_TIMELOCK_THRESHOLD) {
+            pendingDisputeResolutions[escrowId] = PendingDisputeResolution({
+                winner: winner,
+                reason: reason,
+                executeAfter: block.timestamp + DISPUTE_TIMELOCK_DELAY,
+                executed: false
+            });
+            emit DisputeResolutionScheduled(escrowId, winner, block.timestamp + DISPUTE_TIMELOCK_DELAY);
+            return;
+        }
+
+        // Low-value disputes resolve immediately
+        _executeDisputeResolution(escrowId, winner, reason);
+    }
+
+    /**
+     * @notice Execute a timelocked dispute resolution
+     * @param escrowId Escrow identifier
+     */
+    function executeDisputeResolution(bytes32 escrowId) external nonReentrant onlyOwner whenNotPaused {
+        PendingDisputeResolution storage pending = pendingDisputeResolutions[escrowId];
+        if (pending.executeAfter == 0) revert DisputeResolutionNotFound();
+        if (pending.executed) revert DisputeResolutionAlreadyExecuted();
+        if (block.timestamp < pending.executeAfter) revert DisputeResolutionNotReady();
+
+        pending.executed = true;
+        _executeDisputeResolution(escrowId, pending.winner, pending.reason);
+    }
+
+    /**
+     * @notice Cancel a pending dispute resolution
+     * @param escrowId Escrow identifier
+     */
+    function cancelDisputeResolution(bytes32 escrowId) external onlyOwner {
+        PendingDisputeResolution storage pending = pendingDisputeResolutions[escrowId];
+        if (pending.executeAfter == 0) revert DisputeResolutionNotFound();
+        if (pending.executed) revert DisputeResolutionAlreadyExecuted();
+
+        delete pendingDisputeResolutions[escrowId];
+        emit DisputeResolutionCancelled(escrowId);
+    }
+
+    /**
+     * @notice Internal function to execute dispute resolution
+     */
+    function _executeDisputeResolution(
+        bytes32 escrowId,
+        address winner,
+        string memory reason
+    ) internal {
+        Escrow storage escrow = escrows[escrowId];
+        Dispute storage dispute = disputes[escrowId];
 
         dispute.resolved = true;
         dispute.winner = winner;
@@ -600,7 +683,7 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
     function resolveChallenge(
         bytes32 escrowId,
         bool passed
-    ) external nonReentrant onlyOracle {
+    ) external nonReentrant onlyOracle whenNotPaused {
         Challenge storage challenge = challenges[escrowId];
         Escrow storage escrow = escrows[escrowId];
 
@@ -617,14 +700,24 @@ contract RookEscrow is ReentrancyGuard, Ownable, Pausable {
         uint256 cachedStake = challenge.stake;
 
         if (passed) {
-            // Seller passed - return stake to challenger, continue escrow
+            // Seller passed - slash stake (50% penalty), reward seller, continue escrow
             escrow.status = EscrowStatus.Active;
-            bool success = usdc.transfer(cachedChallenger, cachedStake);
-            if (!success) revert TransferFailed();
+
+            uint256 slashAmount = (cachedStake * CHALLENGE_SLASH_PERCENT) / 100;
+            uint256 returnAmount = cachedStake - slashAmount;
+
+            // Return remaining stake to challenger
+            bool success1 = usdc.transfer(cachedChallenger, returnAmount);
+            if (!success1) revert TransferFailed();
+
+            // Reward seller with slashed amount
+            bool success2 = usdc.transfer(escrow.seller, slashAmount);
+            if (!success2) revert TransferFailed();
 
             delete challenges[escrowId];
 
-            emit ChallengeResolved(escrowId, true, cachedChallenger, cachedStake);
+            emit ChallengeStakeSlashed(escrowId, cachedChallenger, escrow.seller, slashAmount);
+            emit ChallengeResolved(escrowId, true, cachedChallenger, returnAmount);
         } else {
             // Seller failed - return stake to challenger, refund buyer
             escrow.status = EscrowStatus.Refunded;

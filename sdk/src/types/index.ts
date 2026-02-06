@@ -4,8 +4,16 @@ export interface RookConfig {
   privateKey?: string;
 }
 
+/**
+ * Amount type supporting multiple input formats for precision
+ * - number: Simple amounts (may lose precision for very large values)
+ * - string: Decimal string like "100.50" (recommended for precision)
+ * - bigint: Raw USDC units (6 decimals) for exact values
+ */
+export type AmountInput = number | string | bigint;
+
 export interface EscrowParams {
-  amount: number;
+  amount: AmountInput;
   recipient: string;  // Address, @handle, or ENS
   job: string;
   threshold?: number;
